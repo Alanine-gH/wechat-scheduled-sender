@@ -343,6 +343,40 @@ def capture_window(hwnd: int, out_path: str) -> bool:
 # 发送引擎
 # ---------------------------------------------------------------------------
 class SendEngine:
+    def _uia_alive(self) -> bool:
+        """控件树现在还在不在（廉价检查）。"""
+        try:
+            root = auto.ControlFromHandle(self.hwnd)
+            if root is None:
+                return False
+            if _count_mmui(root, 4) >= 1:
+                return True
+            return root.GroupControl(searchDepth=30,
+                                     AutomationId="MainView").Exists(0.25)
+        except Exception:
+            return False
+
+    def ensure_alive(self) -> bool:
+        """确保控件树可用；不在就重新唤醒 gate（自愈）。
+
+        实测（微信 4.2.0.11）：界面状态变化之后（按 Esc 关浮层、打开搜一搜
+        面板等），微信会重建 MMUI 渲染子窗口，控件树随之消失。
+        这不是"版本不支持"，因为**重新写一次 gate 字节就能恢复**，
+        不必重启微信 —— 所以不能只在启动时唤醒一次。
+        """
+        if self._uia_alive():
+            return True
+        for _ in range(3):
+            try:
+                wake_accessibility(self.hwnd, retries=1)
+                ensure_window_visible(self.hwnd)
+            except Exception:
+                pass
+            time.sleep(1.2)
+            if self._uia_alive():
+                return True
+        return False
+
     def __init__(self, hwnd: Optional[int] = None):
         # 必须先在当前线程初始化 COM，否则后台线程拿不到控件树
         init_com()
@@ -519,14 +553,36 @@ class SendEngine:
     # （返回公众号文章），而不是打开会话。必须跳过。
     NETWORK_ROW_HINTS = ("搜索网络结果", "搜一搜", "网络结果", "搜索文章", "查找")
 
+    def _panel_present(self) -> bool:
+        """当前是否盖着搜索浮层 / 搜一搜面板。
+
+        只在真的有时才按 Esc —— 无脑按 Esc 会把可用的搜索框一起收掉，
+        还会让微信重建渲染子窗口、把控件树弄没（实测）。
+        """
+        try:
+            lst = self.root.ListControl(searchDepth=30, AutomationId="search_list")
+            if lst.Exists(0.2):
+                return True
+            for cls in ("mmui::SearchContentPopover", "mmui::SearchContentView"):
+                c = self.root.GroupControl(searchDepth=30, ClassName=cls)
+                if c.Exists(0.2):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _escape_panels(self, times: int = 3) -> None:
-        """按 Esc 关掉可能打开的浮层/搜一搜面板，把界面还原到可搜索状态。"""
+        """按 Esc 关掉已打开的浮层/搜一搜面板。没有浮层时什么也不做。"""
+        if not self._panel_present():
+            return
         for _ in range(times):
             try:
                 auto.SendKeys("{Esc}", waitTime=0.2)
             except Exception:
                 pass
             time.sleep(0.45)
+            if not self._panel_present():
+                return
 
     def _dismiss_popover(self) -> None:
         """确保搜索浮层是干净的。
@@ -584,6 +640,9 @@ class SendEngine:
 
         也不再用「回车进入」作为兜底：在搜索框里按回车同样会触发网络搜索。
         """
+        # 控件树可能在上一次操作后消失了（微信会重建渲染子窗口），先自愈
+        self.ensure_alive()
+
         kw = (display or target or "").strip()
         if not kw:
             return False
@@ -681,39 +740,56 @@ class SendEngine:
         return best[2]
 
     def _scroll_session_list(self, lst) -> bool:
-        """把会话列表往下翻一屏（语义滚动优先，不依赖坐标）。"""
-        try:
-            sp = lst.GetScrollPattern()
-            if sp is not None:
-                sp.Scroll(auto.ScrollAmount.NoAmount,
-                          auto.ScrollAmount.LargeIncrement)
-                return True
-        except Exception:
-            pass
-        # 退化：把鼠标移到列表自身的中心再滚轮（位置取自控件矩形，不是写死的坐标）
-        try:
-            r = lst.BoundingRectangle
-            if (r.right - r.left) > 10 and (r.bottom - r.top) > 10:
-                lst.SetFocus()
-                auto.WheelDown(wheelTimes=5, waitTime=0.1)
-                return True
-        except Exception:
-            pass
-        return False
+        """把会话列表往下翻一屏（返回是否翻动了）。
 
-    def _click_session_item(self, target: str, max_scroll: int = 4) -> bool:
+        实测（微信 4.2.0.11）：
+          * 会话列表**不提供 ScrollPattern**（`GetScrollPattern()` 返回 None）；
+          * 滚轮**不可靠** —— 它依赖鼠标当前位置，第一次之后就失效
+            （实测连滚 14 次列表纹丝不动）；
+          * **列表获焦后按 PageDown 可以稳定翻页** —— 这是唯一稳定的方式。
+        所以这里用键盘翻页，不依赖坐标、也不依赖滚轮。
+        """
+        try:
+            before = [c.Name for c in lst.GetChildren()]
+        except Exception:
+            before = None
+        try:
+            lst.SetFocus()
+            time.sleep(0.2)
+            auto.SendKeys("{PageDown}", waitTime=0.1)
+        except Exception:
+            return False
+        time.sleep(0.7)
+        try:
+            after = [c.Name for c in lst.GetChildren()]
+            if before is not None and after == before:
+                return False      # 没翻动，说明到底了
+        except Exception:
+            pass
+        return True
+
+    def _click_session_item(self, target: str, max_scroll: int = 30) -> bool:
         """在会话列表里找目标并点开。
 
-        会话列表只渲染可见的若干行，目标可能被压在下面；搜索框又可能
-        被折叠/换类名拿不到，所以这里支持**滚动若干屏**继续找，
-        避免「搜索不可用就整条失败」。
-
-        名称比较同时用原文与归一化形式，兼容群名里的 emoji / 符号。
+        会话列表只渲染可见的 9 行（虚拟滚动），目标基本都在可见区之外，
+        所以必须翻页找。翻页用键盘 PageDown（见 `_scroll_session_list`）。
+        max_scroll 给得比较宽，因为翻到底会自动停下。
         """
         lst = self._session_list()
         if lst is None:
             return False
         want = normalize_name(target)
+
+        # 先把列表回到顶部再往下找。
+        # 打开会话会让它跳到列表最前，所以每次查找都必须从头开始，
+        # 否则会从上次翻到的位置继续，把靠前的目标漏掉。
+        try:
+            lst.SetFocus()
+            time.sleep(0.15)
+            auto.SendKeys("{Home}", waitTime=0.1)
+            time.sleep(0.5)
+        except Exception:
+            pass
 
         for _round in range(max_scroll + 1):
             try:
@@ -729,10 +805,16 @@ class SendEngine:
                         hit = normalize_name(name) == want
                     if not hit:
                         continue
+                    # 注意：会话项的 InvokePattern **返回成功但不切换会话**
+                    # （微信 4.2.0.11 实测，与「发送」按钮的 InvokePattern
+                    # 同样无效），所以主通道用 Click，Invoke 只作兜底。
                     try:
-                        it.GetInvokePattern().Invoke()
-                    except Exception:
                         it.Click()
+                    except Exception:
+                        try:
+                            it.GetInvokePattern().Invoke()
+                        except Exception:
+                            pass
                     time.sleep(1.2)
                     return True
                 except Exception:
