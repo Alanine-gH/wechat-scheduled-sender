@@ -55,11 +55,20 @@ fs.mkdirSync(env.ELECTRON_BUILDER_CACHE, { recursive: true });
 fs.mkdirSync(env.ELECTRON_CACHE, { recursive: true });
 
 const args = process.argv.slice(2);
-process.stdout.write('[build] electron-builder 缓存目录: ' + env.ELECTRON_BUILDER_CACHE + '\n');
-process.stdout.write('[build] 二进制镜像: ' + env.ELECTRON_BUILDER_BINARIES_MIRROR + '\n');
-process.stdout.write('[build] 参数: ' + (args.length ? args.join(' ') : '(空，默认当前平台)') + '\n\n');
 
-const child = spawn(process.execPath, [cli, ...args], {
+// electron-builder 检测到 CI 环境（或带 tag 构建）时会**自己去发布 Release**，
+// 需要 GH_TOKEN；没配就报
+//   "GitHub Personal Access Token is not set ... using env GH_TOKEN"
+// 而构建其实已经成功。本项目的发布统一交给 CI 里的 action（或手动 gh release），
+// 所以这里默认补 --publish never，除非调用方自己指定了 --publish。
+const hasPublish = args.some((a) => a === '--publish' || a.startsWith('--publish='));
+const finalArgs = hasPublish ? args : [...args, '--publish', 'never'];
+
+process.stdout.write('[build] electron-builder 缓存目录: ' + env.ELECTRON_BUILDER_CACHE + '\n');
+process.stdout.write('[build] 二进制镜像: ' + (env.ELECTRON_BUILDER_BINARIES_MIRROR || '(官方源)') + '\n');
+process.stdout.write('[build] 参数: ' + (finalArgs.length ? finalArgs.join(' ') : '(空，默认当前平台)') + '\n\n');
+
+const child = spawn(process.execPath, [cli, ...finalArgs], {
   stdio: 'inherit',
   cwd: projectDir,
   env,
