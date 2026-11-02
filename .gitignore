@@ -68,11 +68,9 @@ _*.txt
 wechatauto_logs/
 @AutomationLog.txt
 
-# --- 宣传视频的中间产物（体积大且可重新生成，见 宣传视频/工程/制作视频.py）---
-宣传视频/工程/clip*.mp4
-宣传视频/工程/joined.mp4
-宣传视频/工程/voice*.wav
-宣传视频/工程/voice*.mp3
-宣传视频/工程/原创科技节奏.wav
-宣传视频/工程/captions.ass
-宣传视频/工程/concat.txt
+# --- 宣传视频：整个目录都不进仓库 ---
+# 成片 5.7 MB 属于「发布产物」，按约定放 Releases 当资产，
+# 不放仓库（否则每次 clone 都要拖一份二进制）。
+# 生成脚本与素材留在本地，可随时用 宣传视频/工程/制作视频.py 重建。
+# 需要分享时：gh release upload <tag> 宣传视频/*.mp4
+宣传视频/
