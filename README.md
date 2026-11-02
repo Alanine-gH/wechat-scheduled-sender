@@ -31,7 +31,9 @@ npm start
 12_创新课_发送脚本/               ← 安装目录 = 用户文件根目录
 ├─ 启动.bat                      启动入口（纯 ASCII，见「环境坑」第 1 条）
 ├─ 启动-浏览器模式.bat             调试用：不启动 Electron
+├─ 打包.bat                       打包入口（NSIS 安装包）
 ├─ launch.js                      Electron 启动器（绕开 npm .bin shim）
+├─ build.js                       electron-builder 启动器（绕开 shim + 缓存改道）
 ├─ package.json                   Electron 应用清单 / 打包配置
 ├─ requirements.txt               Python 依赖
 ├─ run.py                         浏览器模式启动器
@@ -344,16 +346,47 @@ UTF-8 中文字符的尾字节会落在 GBK 前导字节区间并**吃掉后面�
 
 ## 七、打包
 
+双击 **`打包.bat`**，或：
+
 ```bat
 npm run dist            :: NSIS 安装包（可选安装目录）
 npm run dist:portable   :: 免安装便携版
 ```
 
-产物在 `dist/`。打包配置里 `extraResources` 会把 `backend/` 与 `frontend/`
-放进 `resources/`，主进程在打包模式下从那里加载。
+产物在 `dist/`：`WeChatSender-<版本>-x64.exe`（约 78 MB）。
+
+打包配置里 `extraResources` 会把 `backend/` 与 `frontend/` 放进 `resources/`，
+主进程在打包模式下从那里加载。
 
 > 打包后 `app.isPackaged` 为真，安装目录取 `path.dirname(app.getPath('exe'))`；
 > 开发模式取项目根目录。
+
+### 打包环节的三个坑（都已在 `build.js` 里处理）
+
+1. **不能用 `electron-builder` 直接跑 npm script**
+   路径含 `&` 时会打断 `.bin` shim，报
+   `Cannot find module 'D:\静静\electron-builder\cli.js'`。
+   `build.js` 直接定位 `node_modules/electron-builder/cli.js` 并用 `spawn` 拉起。
+
+2. **`electron-builder` 默认下载 Electron 二进制**
+   走 GitHub releases，国内经常超时。配置里加了
+   `"electronDist": "node_modules/electron/dist"`，直接用本地已解压的 Electron，**完全离线**。
+
+3. **`nsis` / `winCodeSign` 等构建二进制也走 GitHub**
+   `build.js` 默认把它们指向 npmmirror 镜像：
+
+   ```
+   ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
+   ```
+
+   想用官方源就把它设成空字符串再跑。
+
+另外，`build.js` 把构建缓存钉在 `<项目>\cache\electron-builder`，
+Electron 二进制缓存钉在 `<项目>\cache\electron` —— 与「所有文件都在安装目录下」一致，
+不写 `%LOCALAPPDATA%`。
+
+> 提示：`dist\win-unpacked\` 本身就是**可直接运行的绿色版**，
+> 不装安装包也能用（双击里面的 `WeChatSender.exe`）。
 
 ---
 
