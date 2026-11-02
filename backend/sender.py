@@ -145,6 +145,66 @@ def ensure_window_visible(hwnd: int) -> None:
     time.sleep(0.8)
 
 
+# 本程序完整验证过的微信版本。微信升级会改 Weixin.dll，
+# accessibility gate（控件树开关）的位置随之变化，新版本可能扫不准。
+VERIFIED_WECHAT_VERSIONS = ("4.1.15.13", "4.1.15.53")
+
+
+_VERSION_DIR_RE = re.compile(r"^\d+\.\d+(\.\d+)*$")
+
+
+def detect_wechat_version() -> Optional[str]:
+    """推断正在运行的微信版本（形如 ``4.2.0.11``）。
+
+    微信 4.x 有两种安装结构，两种都要认：
+      * ``<安装目录>\\<版本>\\Weixin.exe``     —— exe 就在版本目录里
+      * ``<安装目录>\\Weixin.exe`` + ``<安装目录>\\<版本>\\Weixin.dll``
+        —— exe 是启动器，真正带版本的是子目录里的 Weixin.dll
+        （本机就是这种：``C:\\soft\\Weixin\\Weixin.exe`` 与 ``4.2.0.11\\``）
+    """
+    try:
+        import psutil
+    except Exception:
+        return None
+
+    exe = None
+    try:
+        for p in psutil.process_iter(["name", "exe"]):
+            try:
+                if (p.info.get("name") or "").lower().startswith("weixin"):
+                    e = p.info.get("exe")
+                    if e:
+                        exe = e
+                        break
+            except Exception:
+                continue
+    except Exception:
+        return None
+    if not exe:
+        return None
+
+    base = os.path.dirname(exe)
+    # 情况 A：exe 自身就在版本目录里
+    if _VERSION_DIR_RE.match(os.path.basename(base)):
+        return os.path.basename(base)
+
+    # 情况 B：启动器旁边按版本命名的子目录，取 Weixin.dll 最新的那个
+    try:
+        cands = []
+        for n in os.listdir(base):
+            full = os.path.join(base, n)
+            if not (os.path.isdir(full) and _VERSION_DIR_RE.match(n)):
+                continue
+            dll = os.path.join(full, "Weixin.dll")
+            cands.append((os.path.getmtime(dll) if os.path.exists(dll) else 0, n))
+        if cands:
+            cands.sort(reverse=True)
+            return cands[0][1]
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # UIA gate 热激活
 # ---------------------------------------------------------------------------
@@ -293,15 +353,37 @@ class SendEngine:
         self._ensure_uia()
 
     def _ensure_uia(self) -> None:
+        """确保控件树可用。
+
+        实测：gate 的唤醒**首次经常失败、隔几秒重试才成功**
+        （用户日志里就是 16:13:57 失败、16:14:57 成功）。
+        所以这里分多轮尝试，每轮之间给微信一点时间，
+        而不是一次失败就把整个任务判死。
+        """
         ensure_window_visible(self.hwnd)
-        if not wake_accessibility(self.hwnd):
-            raise RuntimeError(
-                "微信控件树未能实体化（accessibility gate 未生效）。"
-                "请确认微信已登录；若刚重启过微信，重试本程序即可。"
-            )
-        self.root = auto.ControlFromHandle(self.hwnd)
-        if self.root is None:
-            raise RuntimeError("无法附加到微信窗口")
+        for attempt in range(1, 5):
+            if wake_accessibility(self.hwnd, retries=1):
+                self.root = auto.ControlFromHandle(self.hwnd)
+                if self.root is not None:
+                    return
+            if attempt < 4:
+                time.sleep(2.5)
+        self.root = None
+
+        ver = detect_wechat_version()
+        hint = ""
+        if ver and ver not in VERIFIED_WECHAT_VERSIONS:
+            hint = ("\n检测到微信版本 %s；本程序只在 %s 上完整验证过。"
+                    "微信升级会改变 accessibility gate 的位置，"
+                    "可能导致控件树无法实体化。"
+                    "建议关闭微信自动更新并退回已验证版本。"
+                    % (ver, " / ".join(VERIFIED_WECHAT_VERSIONS)))
+        elif ver:
+            hint = "\n当前微信版本 %s（已验证版本）。" % ver
+        raise RuntimeError(
+            "微信控件树未能实体化（accessibility gate 未生效）。"
+            "请确认微信已登录；若刚重启过微信，重试本程序即可。" + hint
+        )
 
     # -- 控件查找 ----------------------------------------------------------
     def _search_box(self, min_width: int = 24):
