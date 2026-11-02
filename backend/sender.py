@@ -63,7 +63,9 @@ def search_keys(name: str, max_len: int = 6) -> List[str]:
         if len(norm) > max_len:
             cands.append(norm[-max_len:])
         cands.append(norm)
-    cands.append((name or "")[:max_len])
+    # 注意：不要把「带符号的原文」作为候选。
+    # 输入 `上海财税-【` 这类残缺符号串时，微信只会给「搜索网络结果」，
+    # 点进去就是搜一搜面板（实测）。
     for k in cands:
         k = (k or "").strip()
         if k and k not in out:
@@ -529,11 +531,15 @@ class SendEngine:
     def _dismiss_popover(self) -> None:
         """确保搜索浮层是干净的。
 
-        先 Esc 收干净，再确认能拿到搜索框；拿不到就切回「微信」标签页
-        （停在通讯录/朋友圈等页面时本来就没有搜索框）。
+        **搜索框已经可用时不要按 Esc** —— Esc 会把搜索框收起来，
+        导致后面 `_ensure_search_box()` 拿不到控件、直接判定失败
+        （实测就是这样：开局搜索框可用，一轮 open_chat 后变不可用）。
         """
+        if self._search_box() is not None:
+            return
         self._escape_panels(2)
         if self._search_box() is None:
+            # 可能停在通讯录/朋友圈等页面，切回「微信」标签页
             try:
                 tab = self.root.ButtonControl(searchDepth=30, Name="微信")
                 if tab.Exists(0.4):
