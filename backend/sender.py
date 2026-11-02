@@ -6,7 +6,8 @@
    实体化。微信重启/升级/重登后该字节会重置为 0，因此每次运行前都必须重写并校验。
 2. 通过 AutomationId 定位控件（session_list / chat_input_field / 发送按钮），
    用 InvokePattern / ValuePattern 语义调用 —— 窗口移动、缩放完全不影响。
-3. 目标优先用 wxid（全局唯一；昵称存在重名，实测 169 个），必要时降级到显示名。
+3. 打开会话**只用显示名**，不用 wxid：微信搜索框不认 wxid，输入它只会命中
+   「搜索网络结果」并打开搜一搜面板。wxid 仅用于发送后的数据库回读校验。
 4. 发送后可选做数据库回读校验（真实落库才算成功），并截图存档。
 """
 from __future__ import annotations
@@ -44,23 +45,44 @@ def init_com() -> None:
         pass
 
 
-def find_wechat_window() -> Optional[int]:
+def find_wechat_window(restore: bool = True) -> Optional[int]:
+    """找到微信主窗口句柄。
+
+    注意最小化的情况：窗口最小化时 GetWindowRect 会返回图标尺寸（实测 160x28），
+    如果按「尺寸必须 > 300」直接筛掉，就会得出「没找到微信」的错误结论 ——
+    而恢复逻辑在查找之后才执行，永远没机会跑。
+    所以这里遇到尺寸过小的候选时，先判断是否最小化，是就恢复再测一次。
+    """
     if win32gui is None:
         return None
     found: List[tuple] = []
+
+    def _size(hwnd):
+        l, t, r, b = win32gui.GetWindowRect(hwnd)
+        return r - l, b - t
 
     def _cb(hwnd, _):
         try:
             cls = win32gui.GetClassName(hwnd)
             if WECHAT_MAIN_CLASS not in cls:
                 return True
-            l, t, r, b = win32gui.GetWindowRect(hwnd)
-            if (r - l) < 300 or (b - t) < 300:
-                return True
             title = win32gui.GetWindowText(hwnd)
             if not any(x in title for x in WECHAT_TITLE_HINTS):
                 return True
-            found.append((hwnd, (r - l) * (b - t)))
+
+            w, h = _size(hwnd)
+            if (w < 300 or h < 300) and restore and win32gui.IsIconic(hwnd):
+                # 最小化 → 先恢复，再重新量尺寸
+                try:
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    time.sleep(0.35)
+                except Exception:
+                    pass
+                w, h = _size(hwnd)
+
+            if w < 300 or h < 300:
+                return True
+            found.append((hwnd, w * h))
         except Exception:
             pass
         return True
@@ -135,18 +157,27 @@ def _count_mmui(root, max_depth: int = 4) -> int:
 
 
 def _uia_ready(hwnd: int, timeout: float = 5.0, need: int = 3) -> bool:
-    """检查控件树是否已实体化。
+    """检查控件树是否已实体化（gate 是否生效）。
 
-    判定依据：树里出现 >= need 个 mmui:: 控件。
-    不用 session_list / MainView 这类页面相关控件 —— 界面停在通讯录、
-    朋友圈等页面时它们不存在，会误判成「gate 未生效」。
+    判定用两个信号，命中任一即可：
+
+    1. 能按 AutomationId 找到主容器 ``MainView``。它是各页面（聊天/通讯录/
+       朋友圈）共同的根容器，gate 生效就必然存在 —— 最可靠。
+    2. 树里出现 >= need 个 ``mmui::`` 控件。
+
+    注意第 2 条必须数到第 6 层：``mmui::MainView`` 本身就在第 4 层
+    （窗口 → Pane → QWidget → QStackedWidget → MainView），
+    只数 4 层会得到很少的计数，从而把「已就绪」误判成「gate 未生效」。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             root = auto.ControlFromHandle(hwnd)
-            if root is not None and _count_mmui(root, 4) >= need:
-                return True
+            if root is not None:
+                if root.GroupControl(searchDepth=30, AutomationId="MainView").Exists(0.4):
+                    return True
+                if _count_mmui(root, 6) >= need:
+                    return True
         except Exception:
             pass
         time.sleep(0.4)
@@ -255,90 +286,138 @@ class SendEngine:
             pass
         return None
 
-    def _dismiss_popover(self) -> None:
-        for _ in range(3):
-            if self._search_box().Exists(0.2):
-                return
+    # 搜索结果里属于「网络搜索」的入口行。点中它们会打开搜一搜面板
+    # （返回公众号文章），而不是打开会话。必须跳过。
+    NETWORK_ROW_HINTS = ("搜索网络结果", "搜一搜", "网络结果", "搜索文章", "查找")
+
+    def _escape_panels(self, times: int = 3) -> None:
+        """按 Esc 关掉可能打开的浮层/搜一搜面板，把界面还原到可搜索状态。"""
+        for _ in range(times):
             try:
                 auto.SendKeys("{Esc}", waitTime=0.2)
             except Exception:
                 pass
-            time.sleep(0.5)
+            time.sleep(0.45)
+
+    def _dismiss_popover(self) -> None:
+        """确保搜索浮层是干净的。
+
+        搜索框存在只说明「聊天页可搜索」，不代表没有别的面板盖着；
+        所以先 Esc 收干净，再确认搜索框可用。
+        """
+        self._escape_panels(2)
+        if not self._search_box().Exists(0.3):
+            # 可能停在通讯录等页面，切回微信标签再试
+            try:
+                tab = self.root.ButtonControl(searchDepth=30, Name="微信")
+                if tab.Exists(0.4):
+                    tab.Click()
+                    time.sleep(1.0)
+            except Exception:
+                pass
+        return
 
     # -- 打开会话 ----------------------------------------------------------
+    def _search_row_split(self, lst):
+        """把搜索结果分成「聊天行」与「是否存在网络搜索入口」。
+
+        返回 (list[(name, control)], 是否有网络入口)。
+        """
+        chats, has_network = [], False
+        try:
+            items = lst.GetChildren()
+        except Exception:
+            return chats, has_network
+        for it in items:
+            try:
+                nm = (it.Name or "").strip()
+            except Exception:
+                continue
+            if not nm:
+                continue
+            if any(h in nm for h in self.NETWORK_ROW_HINTS):
+                has_network = True
+                continue
+            # 会话行会带换行分段（名称\n时间/预览），取首行做名称比较
+            chats.append((nm.split("\n")[0].strip(), it))
+        return chats, has_network
+
     def open_chat(self, target: str, display: Optional[str] = None,
                   timeout: float = 12.0) -> bool:
-        """打开会话。target 优先按 wxid 搜索，失败则用显示名。"""
-        self._dismiss_popover()
-        keywords: List[str] = [k for k in (target, display) if k]
-        # 去重
-        uniq: List[str] = []
-        for k in keywords:
-            if k not in uniq:
-                uniq.append(k)
+        """打开会话。
 
-        # 先试会话列表直接命中（用显示名）
-        for kw in uniq:
-            if self._click_session_item(kw):
-                if self._verify_chat(kw, display, timeout):
-                    return True
+        **只用显示名搜索，绝不用 wxid**：微信搜索框不认 wxid，
+        输入 wxid 只会命中「搜索网络结果」，点进去就是搜一搜面板
+        （公众号文章列表），而不是会话 —— 这正是实际踩到的 bug。
+
+        也不再用「回车进入」作为兜底：在搜索框里按回车同样会触发网络搜索。
+        """
+        kw = (display or target or "").strip()
+        if not kw:
+            return False
+
+        # 只有 wxid / 群 id、没有显示名时，不要往搜索框里输 ——
+        # 微信搜索框不认这类 id，只会弹出「搜索网络结果」。
+        if kw.endswith("@chatroom") or kw.startswith(("wxid_", "gh_")):
+            self._dismiss_popover()
+            if self._click_session_item(kw) and self._verify_chat(kw, None, timeout):
+                return True
+            return False
+
+        self._dismiss_popover()
+
+        # 1) 会话列表里直接命中（最快，也最不容易出错）
+        if self._click_session_item(kw) and self._verify_chat(kw, display, timeout):
+            return True
 
         box = self._search_box()
         if not box.Exists(0.5):
             raise RuntimeError("未找到搜索框，控件树可能不完整")
 
-        for kw in uniq:
-            try:
-                box.SetFocus()
-                time.sleep(0.2)
-                box.SendKeys("{Ctrl}a", waitTime=0.05)
-                box.SendKeys("{Delete}", waitTime=0.05)
-                time.sleep(0.25)
-                box.SendKeys(kw, waitTime=0.05)
-                time.sleep(1.5)
-            except Exception:
-                continue
+        # 2) 本地搜索
+        try:
+            box.SetFocus()
+            time.sleep(0.2)
+            box.SendKeys("{Ctrl}a", waitTime=0.05)
+            box.SendKeys("{Delete}", waitTime=0.05)
+            time.sleep(0.25)
+            box.SendKeys(kw, waitTime=0.05)
+            time.sleep(1.5)
+        except Exception:
+            self._escape_panels()
+            return False
 
-            lst = self._search_list()
-            if lst is not None:
-                items = lst.GetChildren()
-                # 精确匹配优先（避免重名命中错人）
-                exact = None
-                first_chat = None
-                for it in items:
-                    try:
-                        nm = (it.Name or "").strip()
-                        if nm and nm != "搜索网络结果":
-                            if first_chat is None:
-                                first_chat = it
-                            if display and nm == display:
-                                exact = it
-                                break
-                            if nm == kw:
-                                exact = it
-                                break
-                    except Exception:
-                        continue
-                pick = exact or first_chat
-                if pick is not None:
-                    try:
-                        pick.Click()
-                    except Exception:
-                        pass
-                    time.sleep(1.3)
-                    if self._verify_chat(kw, display, timeout):
-                        return True
+        lst = self._search_list()
+        if lst is not None:
+            chats, has_network = self._search_row_split(lst)
 
-            # 退化：回车进入
-            try:
-                box.SetFocus()
-                box.SendKeys("{Enter}", waitTime=0.1)
-                time.sleep(1.5)
-            except Exception:
+            # 只接受精确匹配；否则要求唯一的包含匹配，避免点错重名的人
+            pick = None
+            for nm, it in chats:
+                if nm == kw:
+                    pick = it
+                    break
+            if pick is None:
+                cands = [(nm, it) for nm, it in chats if kw in nm or nm in kw]
+                if len(cands) == 1:
+                    pick = cands[0][1]
+
+            if pick is not None:
+                try:
+                    pick.Click()
+                except Exception:
+                    pass
+                time.sleep(1.3)
+                if self._verify_chat(kw, display, timeout):
+                    return True
+
+            if has_network and not chats:
+                # 只有「搜索网络结果」这一行 —— 说明本地没有这个会话。
+                # 绝对不要点它，点了就是搜一搜面板。
                 pass
-            if self._verify_chat(kw, display, timeout):
-                return True
 
+        # 失败：清场，避免把搜一搜面板留在界面上影响下一条
+        self._escape_panels()
         return False
 
     def _click_session_item(self, target: str) -> bool:
