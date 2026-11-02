@@ -1,0 +1,189 @@
+# -*- coding: utf-8 -*-
+"""调度器：按「日期种子」生成每日随机发送计划，并按间隔执行。
+
+计划规则（用户需求）：
+- 消息内容来自 data/messages.txt，一行一条
+- 每天 30 条 × 5 轮 ≈ 150 条，约 2.5 小时发完
+- 轮与轮之间随机间隔，均值约 5 分钟
+- 随机数种子 = 当天日期（YYYY-MM-DD），保证同一天的计划可复现
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import random
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+DEFAULT_ROUNDS = 1          # 轮数：默认 1 轮
+DEFAULT_PER_ROUND = 0       # 每轮条数：0 = 跟随已选目标数（每个目标恰好 1 条）
+DEFAULT_INTERVAL_MIN = 3.5  # 轮间隔下限（分钟）
+DEFAULT_INTERVAL_MAX = 6.5  # 轮间隔上限（分钟）
+
+
+@dataclass
+class PlanRound:
+    index: int
+    delay_seconds: float          # 相对上一轮开始的等待秒数
+    messages: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "index": self.index,
+            "delay_seconds": round(self.delay_seconds, 2),
+            "delay_minutes": round(self.delay_seconds / 60.0, 2),
+            "messages": self.messages,
+            "count": len(self.messages),
+        }
+
+
+# 多行消息的分隔符：一条消息 = 两个 --- 之间的内容（块内换行会被完整保留）
+MESSAGE_SEPARATOR = "---"
+
+MODE_LINE = "line"            # 每行一条消息
+MODE_SEPARATOR = "separator"  # --- 分隔，块内换行保留
+
+
+def parse_messages(text: str, mode: Optional[str] = None) -> tuple:
+    """解析消息池文本，返回 (messages, mode)。
+
+    由 ``mode`` 显式指定（推荐，行为确定）：
+
+    * ``"line"``：每行一条消息，忽略空行与 ``#`` 开头的注释行。
+    * ``"separator"``：以独立的 ``---`` 行分隔消息，**块内换行原样保留**，
+      所以「一条多行消息」不会被拆开。
+
+    ``mode`` 为 None 时自动判断：文件里出现 ``---`` 就按 separator，否则按 line。
+    """
+    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    if mode not in (MODE_LINE, MODE_SEPARATOR):
+        mode = MODE_SEPARATOR if any(
+            ln.strip() == MESSAGE_SEPARATOR for ln in raw_lines
+        ) else MODE_LINE
+
+    if mode == MODE_LINE:
+        out = []
+        for ln in raw_lines:
+            if not ln.strip():
+                continue
+            if ln.lstrip().startswith("#"):
+                continue
+            out.append(ln)
+        return out, MODE_LINE
+
+    messages: List[str] = []
+    buf: List[str] = []
+    for ln in raw_lines:
+        if ln.strip() == MESSAGE_SEPARATOR:
+            block = "\n".join(buf).strip("\n")
+            if block.strip():
+                messages.append(block)
+            buf = []
+            continue
+        buf.append(ln)
+    tail = "\n".join(buf).strip("\n")
+    if tail.strip():
+        messages.append(tail)
+    return messages, MODE_SEPARATOR
+
+
+def load_messages(path: str, mode: Optional[str] = None) -> List[str]:
+    """从 txt 读取消息池。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return []
+    return parse_messages(text, mode)[0]
+
+
+def load_messages_detail(path: str, mode: Optional[str] = None) -> Dict[str, Any]:
+    """读取消息池并附带解析模式，供前端展示。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return {"text": "", "messages": [], "count": 0, "mode": mode or MODE_LINE}
+    msgs, used = parse_messages(text, mode)
+    return {"text": text, "messages": msgs, "count": len(msgs), "mode": used}
+
+
+def build_plan(
+    messages: List[str],
+    targets: List[str],
+    seed_date: Optional[str] = None,
+    rounds: int = DEFAULT_ROUNDS,
+    per_round: int = DEFAULT_PER_ROUND,
+    interval_min: float = DEFAULT_INTERVAL_MIN,
+    interval_max: float = DEFAULT_INTERVAL_MAX,
+) -> Dict[str, Any]:
+    """生成当日发送计划。
+
+    ``per_round`` 传 0（默认）时自动取「已选目标数」，即**每个目标恰好发 1 条**，
+    不会把同一条消息对同一个群反复刷。
+
+    每轮从 messages 里随机抽 per_round 条（不足则循环取），
+    再轮转分配给 targets；轮间隔用日期种子随机生成，当天可复现。
+    """
+    seed_date = seed_date or _dt.date.today().isoformat()
+    rng = random.Random(seed_date)  # 种子 = 日期，稳定可复现
+
+    per_round = int(per_round or 0)
+    if per_round <= 0:
+        per_round = max(1, len(targets))
+    rounds = max(1, int(rounds or 1))
+
+    # 间隔是「相邻两次发送之间」的等待时间（不是轮与轮之间）：
+    # 30 个群 × 约 5 分钟 ≈ 150 分钟 ≈ 2.5 小时，符合原始需求。
+    delay_rng = random.Random("%s|delay" % seed_date)
+
+    plan_rounds: List[PlanRound] = []
+    for r in range(rounds):
+        if not messages:
+            picked: List[str] = []
+        elif len(messages) >= per_round:
+            picked = rng.sample(messages, per_round)
+        else:
+            picked = [messages[rng.randrange(len(messages))] for _ in range(per_round)]
+        plan_rounds.append(PlanRound(index=r + 1, delay_seconds=0.0, messages=picked))
+
+    # 把每轮消息轮转分配给目标（随机起点，保证每个目标都被覆盖），
+    # 并给每一条消息分配随机等待时间。
+    assignments: List[Dict[str, Any]] = []
+    tcount = max(1, len(targets))
+    first_send = True
+    for pr in plan_rounds:
+        rng2 = random.Random("%s|%d" % (seed_date, pr.index))
+        start = rng2.randrange(tcount)
+        pairs = []
+        for i, msg in enumerate(pr.messages):
+            tgt = targets[(start + i) % tcount]
+            if first_send:
+                wait = 0.0            # 第一条立即发
+                first_send = False
+            else:
+                wait = delay_rng.uniform(interval_min, interval_max) * 60.0
+            pairs.append({
+                "target": tgt,
+                "text": msg,
+                "delay_seconds": round(wait, 2),
+            })
+        pr.delay_seconds = sum(p["delay_seconds"] for p in pairs)
+        assignments.append({"index": pr.index, "pairs": pairs})
+
+    total = sum(len(a["pairs"]) for a in assignments)
+    total_seconds = sum(pp["delay_seconds"] for a in assignments for pp in a["pairs"])
+
+    return {
+        "seed_date": seed_date,
+        "rounds": rounds,
+        "per_round": per_round,
+        "targets": targets,
+        "target_count": len(targets),
+        "message_pool": len(messages),
+        "total_messages": total,
+        "estimated_seconds": round(total_seconds, 1),
+        "estimated_minutes": round(total_seconds / 60.0, 1),
+        "round_plans": [pr.to_dict() for pr in plan_rounds],
+        "assignments": assignments,
+    }

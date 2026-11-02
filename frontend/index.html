@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 只允许连本地服务；界面内联样式/脚本因此放行 inline -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'">
+<title>微信定时群发控制台</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --panel:#ffffff; --ink:#17181b; --ink2:#5b6070; --line:#e6e8ee;
+    --blue:#2563eb; --blue-soft:#eef3ff; --green:#12a150; --red:#d94040;
+    --radius:14px; --shadow:0 1px 2px rgba(16,24,40,.04),0 8px 24px rgba(16,24,40,.06);
+    --ease:cubic-bezier(.16,1,.3,1);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 22px 80px}
+
+  @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .rise{animation:rise .55s var(--ease) both}
+
+  header{margin-bottom:22px}
+  h1{font-size:23px;margin:0 0 6px;letter-spacing:-.3px}
+  .sub{color:var(--ink2);font-size:13px;margin:0}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:18px 18px 16px;box-shadow:var(--shadow);
+    transition:box-shadow .3s var(--ease),transform .3s var(--ease),border-color .3s}
+  .card:hover{box-shadow:0 2px 6px rgba(16,24,40,.06),0 14px 36px rgba(16,24,40,.09)}
+  .card h2{font-size:14px;margin:0 0 4px;font-weight:600;letter-spacing:.2px}
+  .hint{color:var(--ink2);font-size:12px;margin:0 0 12px}
+
+  label{display:block;font-size:12px;color:var(--ink2);margin:12px 0 6px}
+  select,input[type=number],textarea,input[type=text]{
+    width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:10px;
+    background:#fff;font:inherit;color:var(--ink);outline:none;
+    transition:border-color .2s,box-shadow .2s}
+  select:focus,input:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft)}
+  textarea{min-height:150px;resize:vertical;line-height:1.55;font-family:inherit}
+
+  .msel{position:relative}
+  .msel-btn{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:#fff;
+    text-align:left;cursor:pointer;display:flex;align-items:center;justify-content:space-between;
+    font:inherit;color:var(--ink);transition:border-color .2s,box-shadow .2s}
+  .msel-btn:hover{border-color:#cfd5e3}
+  .msel-btn.open{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft)}
+  .msel-btn .ph{color:#9aa1b2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .caret{transition:transform .3s var(--ease);color:var(--ink2);font-size:11px;flex:none}
+  .msel-btn.open .caret{transform:rotate(180deg)}
+
+  /* 面板需要浮在所有卡片之上：给宿主卡片建立高层叠上下文 */
+  .card.stack{position:relative;z-index:40}
+  .msel-panel{position:absolute;z-index:60;left:0;right:0;top:calc(100% + 6px);background:#fff;
+    border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 34px rgba(16,24,40,.18);overflow:hidden;
+    opacity:0;transform:translateY(-6px) scale(.99);pointer-events:none;
+    transition:opacity .22s var(--ease),transform .22s var(--ease)}
+  .msel-panel.open{opacity:1;transform:none;pointer-events:auto}
+  .msel-tools{display:flex;gap:8px;padding:8px;border-bottom:1px solid var(--line);background:#fbfcfe}
+  .msel-search{flex:1;padding:7px 10px;border:1px solid var(--line);border-radius:8px;font:inherit;outline:none;min-width:0}
+  .msel-list{max-height:290px;overflow:auto;padding:6px}
+  .msel-group{font-size:11px;color:var(--ink2);padding:8px 8px 4px;font-weight:600;letter-spacing:.4px}
+  .msel-item{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:8px;cursor:pointer;
+    transition:background .16s}
+  .msel-item:hover{background:#f4f6fb}
+  .msel-item input{width:15px;height:15px;accent-color:var(--blue);cursor:pointer;flex:none}
+  .msel-item .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .msel-item .tag{font-size:10px;padding:1px 7px;border-radius:20px;border:1px solid var(--line);
+    color:var(--ink2);background:#fafbfd;flex:none}
+  .msel-item .tag.g{background:var(--blue-soft);border-color:#d8e3ff;color:#1e40af}
+  .msel-empty{padding:22px;text-align:center;color:var(--ink2);font-size:12px}
+
+  /* 模式切换（分段控件） */
+  .seg{display:flex;gap:6px;background:#f2f4f9;border:1px solid var(--line);border-radius:11px;
+    padding:4px;margin-bottom:10px}
+  .seg-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;padding:8px 10px;
+    border:0;background:transparent;border-radius:8px;cursor:pointer;font:inherit;color:var(--ink2);
+    transition:background .2s var(--ease),color .2s,box-shadow .2s,transform .14s var(--ease)}
+  .seg-item small{font-size:10px;color:#9aa1b2;transition:color .2s}
+  .seg-item:hover{color:var(--ink)}
+  .seg-item:active{transform:scale(.98)}
+  .seg-item.active{background:#fff;color:var(--blue);box-shadow:0 1px 3px rgba(16,24,40,.1);font-weight:600}
+  .seg-item.active small{color:#5b8def}
+
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 9px;border-radius:20px;
+    background:#f2f4f9;border:1px solid var(--line);color:var(--ink);animation:fade .3s var(--ease) both}
+  .chip.g{background:var(--blue-soft);border-color:#d8e3ff}
+  .chip .x{cursor:pointer;color:#8b93a7;font-weight:700;line-height:1}
+  .chip .x:hover{color:var(--red)}
+
+  .btn{padding:9px 15px;border-radius:10px;border:1px solid var(--line);background:#fff;font:inherit;cursor:pointer;
+    transition:transform .14s var(--ease),background .2s,border-color .2s,box-shadow .2s}
+  .btn:hover{border-color:#cfd5e3;background:#fbfcfe}
+  .btn:active{transform:scale(.975)}
+  .btn.primary{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}
+  .btn.primary:hover{background:#1d4fd8}
+  .btn.danger{color:var(--red);border-color:#f2d5d5}
+  .btn.danger:hover{background:#fdf2f2}
+  .btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+  .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:6px}
+  .metric{background:#fbfcfe;border:1px solid var(--line);border-radius:11px;padding:11px 12px}
+  .metric .k{font-size:11px;color:var(--ink2)}
+  .metric .v{font-size:19px;font-weight:650;letter-spacing:-.3px;margin-top:2px}
+  .metric .v.ok{color:var(--green)} .metric .v.bad{color:var(--red)}
+
+  .logs{margin-top:8px;height:250px;overflow:auto;background:#0f1116;border-radius:11px;padding:11px 12px;
+    font:12px/1.65 ui-monospace,Consolas,monospace;color:#c9d1e0}
+  .logs .l{white-space:pre-wrap;word-break:break-word}
+  .logs .t{color:#5d6a80}
+  .lv-OK{color:#54d68a} .lv-ERROR{color:#ff7b7b} .lv-WARN{color:#f0c268} .lv-INFO{color:#9fb0cc}
+
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink2)}
+  .dot{width:7px;height:7px;border-radius:50%;background:#c3c9d6;transition:background .3s;flex:none}
+  .dot.on{background:var(--green);box-shadow:0 0 0 4px rgba(18,161,80,.12)}
+  .dot.run{background:var(--blue);box-shadow:0 0 0 4px rgba(37,99,235,.14);animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  .bar{height:5px;background:#eceff5;border-radius:4px;overflow:hidden;margin-top:12px}
+  .bar>i{display:block;height:100%;width:0;background:var(--blue);border-radius:4px;transition:width .5s var(--ease)}
+
+  .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(16px);
+    background:#17181b;color:#fff;padding:10px 16px;border-radius:11px;font-size:13px;
+    opacity:0;pointer-events:none;transition:opacity .3s var(--ease),transform .3s var(--ease);z-index:99}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .warn{background:#fffbf0;border:1px solid #f0dfb8;color:#7a5a10;border-radius:10px;padding:10px 12px;font-size:12px;margin-top:10px}
+  .note{background:var(--blue-soft);border:1px solid #d8e3ff;color:#1e40af;border-radius:10px;padding:9px 12px;font-size:12px;margin-top:10px}
+  .full{grid-column:1/-1}
+  .preview{max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:8px;font-size:12px}
+  .preview table{width:100%;border-collapse:collapse}
+  .preview th,.preview td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  .preview th{background:#fbfcfe;color:var(--ink2);font-weight:600;position:sticky;top:0}
+  .preview td.txt{white-space:normal;max-width:420px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="rise">
+    <h1>微信定时群发控制台</h1>
+    <p class="sub">UIA 语义控件驱动微信 4.x · 不依赖鼠标坐标与窗口位置 · 每次发送自动截图存档</p>
+    <p class="sub" id="dataRootLine" style="margin-top:6px"></p>
+  </header>
+
+  <div class="grid">
+
+    <section class="card stack rise" style="animation-delay:.05s">
+      <h2>1 · 账号与目标</h2>
+      <p class="hint">自动读取本机所有已登录过的微信账号</p>
+
+      <label>微信账号</label>
+      <select id="accountSel"><option value="">读取中…</option></select>
+
+      <div class="warn" id="accWarn" style="display:none"></div>
+
+      <label>发送目标（群聊 / 好友分组显示，可多选）</label>
+      <div class="msel" id="msel">
+        <button class="msel-btn" id="mselBtn" type="button">
+          <span class="ph" id="mselText">点击选择群聊或好友…</span>
+          <span class="caret">▾</span>
+        </button>
+        <div class="msel-panel" id="mselPanel">
+          <div class="msel-tools">
+            <input class="msel-search" id="mselSearch" placeholder="搜索名称…">
+            <button class="btn" id="selAllGroups" type="button">全选群</button>
+            <button class="btn" id="selNone" type="button">清空</button>
+          </div>
+          <div class="msel-list" id="mselList"><div class="msel-empty">读取中…</div></div>
+        </div>
+      </div>
+      <div class="chips" id="chips"></div>
+
+      <div class="metrics" style="margin-top:16px">
+        <div class="metric"><div class="k">群聊</div><div class="v" id="mGroups">–</div></div>
+        <div class="metric"><div class="k">好友</div><div class="v" id="mFriends">–</div></div>
+        <div class="metric"><div class="k">已选目标</div><div class="v" id="mSelected">0</div></div>
+        <div class="metric"><div class="k">消息池</div><div class="v" id="mPool">–</div></div>
+      </div>
+    </section>
+
+    <section class="card rise" style="animation-delay:.1s">
+      <h2>2 · 消息内容</h2>
+      <p class="hint">选择解析方式：<b>每行一条</b>适合一句句话；<b>多行消息</b>适合带换行的清单/通知</p>
+
+      <div class="seg" id="modeSeg">
+        <button class="seg-item active" data-mode="line" type="button">
+          每行一条<small>一行 = 一条消息</small>
+        </button>
+        <button class="seg-item" data-mode="separator" type="button">
+          多行消息<small>用 --- 分隔，块内换行保留</small>
+        </button>
+      </div>
+
+      <textarea id="msgBox" placeholder="在这里输入要发送的消息…"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="saveMsgs" type="button">保存到 messages.txt</button>
+        <button class="btn" id="reloadMsgs" type="button">重新读取</button>
+        <span class="pill" id="msgCount">–</span>
+        <span class="pill" id="msgMode" style="color:#2563eb">–</span>
+      </div>
+      <div class="note" id="modeTip" style="display:none"></div>
+    </section>
+
+    <section class="card rise" style="animation-delay:.15s">
+      <h2>3 · 计划参数</h2>
+      <p class="hint">随机种子固定为当天日期，同一天的计划可复现。
+        默认 <b>1 轮</b>，每轮条数填 <b>0</b> 表示「跟随已选目标数」——每个群/好友恰好发 1 条。
+        间隔是<b>相邻两条消息之间</b>的随机等待（均约 5 分钟，30 个目标 ≈ 2.5 小时）</p>
+      <div class="row" style="gap:12px">
+        <div style="flex:1;min-width:90px">
+          <label style="margin-top:0">轮数</label>
+          <input type="number" id="rounds" value="1" min="1" max="50">
+        </div>
+        <div style="flex:1;min-width:110px">
+          <label style="margin-top:0">每轮条数（0=跟随目标数）</label>
+          <input type="number" id="perRound" value="0" min="0" max="200">
+        </div>
+        <div style="flex:1;min-width:100px">
+          <label style="margin-top:0">每条间隔下限(分)</label>
+          <input type="number" id="iMin" value="4" step="0.5" min="0.1">
+        </div>
+        <div style="flex:1;min-width:100px">
+          <label style="margin-top:0">每条间隔上限(分)</label>
+          <input type="number" id="iMax" value="6" step="0.5" min="0.1">
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="genPlan" type="button">生成计划预览</button>
+        <span class="pill" id="planSum">–</span>
+      </div>
+      <div class="preview" id="planPreview" style="display:none"></div>
+    </section>
+
+    <section class="card rise" style="animation-delay:.2s">
+      <h2>4 · 执行</h2>
+      <p class="hint">开始前请确认微信已登录且窗口可恢复</p>
+      <div class="row">
+        <button class="btn primary" id="startBtn" type="button">开始发送</button>
+        <button class="btn danger" id="stopBtn" type="button" disabled>停止</button>
+        <span class="pill"><span class="dot" id="runDot"></span><span id="runText">未运行</span></span>
+      </div>
+      <div class="bar"><i id="bar"></i></div>
+      <div class="metrics" style="margin-top:12px">
+        <div class="metric"><div class="k">当前轮</div><div class="v" id="pRound">0/0</div></div>
+        <div class="metric"><div class="k">成功</div><div class="v ok" id="pSent">0</div></div>
+        <div class="metric"><div class="k">失败</div><div class="v bad" id="pFail">0</div></div>
+        <div class="metric"><div class="k">总数</div><div class="v" id="pTotal">0</div></div>
+      </div>
+      <div class="warn" id="wxWarn" style="display:none">未检测到微信窗口，请先启动并登录微信。</div>
+    </section>
+
+    <section class="card rise full" style="animation-delay:.25s">
+      <h2>运行日志</h2>
+      <p class="hint">截图保存在 shots/&lt;日期&gt;/ 目录下</p>
+      <div class="logs" id="logs"><div class="l"><span class="t">等待开始…</span></div></div>
+    </section>
+
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = { groups: [], friends: [], selected: new Map(), plan: null, polling: null };
+
+/* Electron 模式由 preload 注入 __WCS__（含服务端口与 token）；
+   浏览器模式（python backend/server.py）下 __WCS__ 不存在，走同源 + 不校验。 */
+const WCS = window.__WCS__ || null;
+const API_BASE = (WCS && WCS.baseUrl) ? WCS.baseUrl : '';
+const API_TOKEN = (WCS && WCS.token) ? WCS.token : '';
+
+function toast(msg){
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 2400);
+}
+async function api(path, opts){
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  if(API_TOKEN) headers['X-Token'] = API_TOKEN;
+  const r = await fetch(API_BASE + path, Object.assign({}, opts, {headers}));
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  return j;
+}
+
+/* ---------- 账号 ---------- */
+async function loadAccounts(){
+  const sel = $('accountSel');
+  sel.innerHTML = '<option value="">读取中…</option>';
+  try{
+    const { accounts } = await api('/api/accounts');
+    if(!accounts || !accounts.length){
+      sel.innerHTML = '<option value="">未发现账号</option>';
+      toast('未发现微信账号数据目录');
+      return;
+    }
+    sel.innerHTML = accounts.map(a=>{
+      const label = (a.wxid || a.account) + (a.is_current ? '  （当前登录）' : '');
+      return `<option value="${a.account}">${label}</option>`;
+    }).join('');
+    const cur = accounts.find(a=>a.is_current) || accounts[0];
+    sel.value = cur.account;
+    await loadContacts(cur.account);
+  }catch(e){
+    sel.innerHTML = '<option value="">读取失败</option>';
+    toast('读取账号失败：'+e.message);
+  }
+}
+
+/* ---------- 联系人 ---------- */
+async function loadContacts(account){
+  $('mselList').innerHTML = '<div class="msel-empty">读取中…</div>';
+  try{
+    const d = await api('/api/contacts?account='+encodeURIComponent(account||''));
+    state.groups = d.groups || [];
+    state.friends = d.friends || [];
+    $('mGroups').textContent = d.group_count ?? state.groups.length;
+    $('mFriends').textContent = d.friend_count ?? state.friends.length;
+    // 账号一致性提示：读某账号 DB ≠ 能给它发消息（发送只能操作当前登录窗口）
+    const w = $('accWarn');
+    if(d.is_current_login){
+      w.style.display='none';
+    }else{
+      w.style.display='block';
+      w.textContent = `注意：当前微信窗口登录的不是这个账号（窗口登录：${d.current_account || '未知'}）。`
+        + `可以浏览该账号的群和好友，但实际发送只会发到当前登录的账号，请先在微信里切换登录。`;
+    }
+    renderList();
+    renderChips();
+  }catch(e){
+    $('mselList').innerHTML = '<div class="msel-empty">读取失败：'+e.message+'</div>';
+    toast('读取联系人失败：'+e.message);
+  }
+}
+
+function renderList(){
+  const kw = ($('mselSearch').value || '').trim().toLowerCase();
+  const match = x => !kw || (x.name||'').toLowerCase().includes(kw) || (x.username||'').toLowerCase().includes(kw);
+  const gs = state.groups.filter(match);
+  // 好友可能上万：无搜索词时默认不渲染，避免 DOM 膨胀；输入关键词后再显示
+  const allFs = state.friends.filter(match);
+  const fs = kw ? allFs.slice(0, 300) : [];
+  let html = '';
+  if(gs.length){
+    html += '<div class="msel-group">群聊 · '+gs.length+'</div>';
+    html += gs.map(g=>itemHtml(g,'group')).join('');
+  }
+  if(kw){
+    if(fs.length){
+      const more = allFs.length - fs.length;
+      html += '<div class="msel-group">好友 · '+allFs.length
+        + (more>0 ? `（显示前 ${fs.length} 个）` : '') + '</div>';
+      html += fs.map(f=>itemHtml(f,'friend')).join('');
+    }
+  }else if(state.friends.length){
+    html += '<div class="msel-group">好友 · '+state.friends.length+'（在上方输入关键词后显示）</div>';
+  }
+  if(!html) html = '<div class="msel-empty">没有匹配项</div>';
+  $('mselList').innerHTML = html;
+  $('mselList').querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.addEventListener('change', ()=>{
+      const key = cb.dataset.key;
+      const obj = [...state.groups, ...state.friends].find(x=>keyOf(x)===key);
+      if(cb.checked) state.selected.set(key, obj); else state.selected.delete(key);
+      renderChips();
+    });
+  });
+}
+function keyOf(x){ return x.kind+'::'+x.username; }
+function itemHtml(x, kind){
+  const key = keyOf(x);
+  const on = state.selected.has(key) ? 'checked' : '';
+  const tag = kind==='group'
+    ? `<span class="tag g">群 ${x.member_count||0}</span>`
+    : `<span class="tag">好友</span>`;
+  const nm = escapeHtml(x.name || x.username);
+  return `<label class="msel-item"><input type="checkbox" data-key="${key}" ${on}>
+    <span class="nm">${nm}</span>${tag}</label>`;
+}
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function renderChips(){
+  const chips = $('chips');
+  const arr = [...state.selected.values()];
+  $('mSelected').textContent = arr.length;
+  $('mselText').textContent = arr.length ? `已选 ${arr.length} 个目标` : '点击选择群聊或好友…';
+  if(!arr.length){ chips.innerHTML=''; return; }
+  chips.innerHTML = arr.map(x=>{
+    const k = keyOf(x);
+    return `<span class="chip ${x.kind==='group'?'g':''}">${escapeHtml(x.name||x.username)}
+      <span class="x" data-key="${k}">×</span></span>`;
+  }).join('');
+  chips.querySelectorAll('.x').forEach(el=>{
+    el.addEventListener('click', ()=>{ state.selected.delete(el.dataset.key); renderChips(); renderList(); });
+  });
+}
+
+/* ---------- 消息池 ---------- */
+let curMode = 'line';
+async function loadMessages(){
+  try{
+    const d = await api('/api/messages');
+    $('msgBox').value = d.text || '';
+    setMode(d.mode || 'line');
+    setMsgMeta(d.count || 0, d.mode || 'line');
+  }catch(e){ toast('读取消息失败：'+e.message); }
+}
+function setMode(mode){
+  curMode = mode;
+  document.querySelectorAll('#modeSeg .seg-item').forEach(b=>{
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+}
+function setMsgMeta(count, mode){
+  $('msgCount').textContent = count + ' 条';
+  $('mPool').textContent = count;
+  $('msgMode').textContent = mode === 'separator' ? '多行模式' : '逐行模式';
+
+  const tip = $('modeTip');
+  const raw = $('msgBox').value;
+  const hasSep = /(^|\n)\s*---\s*(\n|$)/.test(raw);
+  const lines = raw.split('\n').filter(s => s.trim()).length;
+
+  if(mode === 'separator'){
+    if(count === 0){
+      tip.style.display = 'block';
+      tip.textContent = '内容为空，或只有分隔符 ---。请先输入要发送的内容。';
+    }else if(hasSep){
+      tip.style.display = 'block';
+      tip.textContent = `多行模式：已按 --- 分成 ${count} 条消息，每条内部的换行会原样保留。`;
+    }else{
+      tip.style.display = 'block';
+      tip.textContent = `多行模式：没有 --- 分隔符，整段（${lines} 行）将作为 1 条多行消息发出。`;
+    }
+  }else{
+    if(count === 0 && lines > 0){
+      tip.style.display = 'block';
+      tip.textContent = '逐行模式解析出 0 条：请检查是否每行都以 # 开头（会被当注释忽略）。';
+    }else{
+      tip.style.display = 'none';
+    }
+  }
+}
+async function saveMessages(){
+  // 直接保存原文，保留多行消息里的换行
+  const raw = $('msgBox').value;
+  try{
+    const r = await api('/api/messages', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text: raw, mode: curMode})});
+    setMode(r.mode);
+    setMsgMeta(r.count, r.mode);
+    toast('已保存 '+r.count+' 条消息');
+  }catch(e){ toast('保存失败：'+e.message); }
+}
+
+/* ---------- 计划 ---------- */
+async function genPlan(){
+  const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
+  if(!targets.length) return toast('请先选择至少一个目标');
+  const body = {
+    targets: targets.map(t=>t.name),
+    rounds: +$('rounds').value, per_round: +$('perRound').value,
+    interval_min: +$('iMin').value, interval_max: +$('iMax').value,
+    account: $('accountSel').value
+  };
+  try{
+    const r = await api('/api/plan', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
+    state.plan = r.plan;
+    state.plan._targets = targets;
+    const p = r.plan;
+    const perTgt = p.target_count ? (p.total_messages / p.target_count) : 0;
+    $('planSum').textContent = `${p.total_messages} 条 · 覆盖 ${p.target_count} 个目标`
+      + `（平均每个 ${perTgt.toFixed(2)} 条）· 约 ${p.estimated_minutes} 分钟 · 种子 ${p.seed_date}`;
+    const rows = p.round_plans.map(rp=>{
+      const t = (rp.messages||[]).slice(0,3).map(m=>escapeHtml(m.split('\n')[0])).join(' / ');
+      return `<tr><td>第 ${rp.index} 轮</td><td>${rp.delay_minutes} 分</td>
+        <td>${rp.count} 条</td><td class="txt">${t}${rp.count>3?' …':''}</td></tr>`;
+    }).join('');
+    $('planPreview').style.display='block';
+    $('planPreview').innerHTML = `<table><thead><tr><th>轮次</th><th>本轮总等待</th><th>条数</th><th>消息预览（首行）</th></tr></thead><tbody>${rows}</tbody></table>`;
+    toast('计划已生成');
+  }catch(e){ toast('生成计划失败：'+e.message); }
+}
+
+/* ---------- 执行 ---------- */
+async function start(){
+  if(!state.plan) return toast('请先生成计划预览');
+  // 把目标对象（含 wxid）绑定到每个 pair，确保按 wxid 精确发送
+  const tlist = state.plan._targets || [...state.selected.values()].map(x=>({name:x.name, username:x.username}));
+  if(!tlist.length) return toast('请先选择目标');
+  state.plan.assignments = state.plan.assignments.map(a=>({...a,
+    pairs: a.pairs.map((pr,i)=>{
+      const t = tlist[i % tlist.length];
+      return {target: t.name, username: t.username, text: pr.text};
+    })}));
+  $('startBtn').disabled = true;
+  try{
+    await api('/api/start', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({plan: state.plan, account: $('accountSel').value})});
+    toast('已开始执行');
+    startPolling();
+  }catch(e){ $('startBtn').disabled=false; toast('启动失败：'+e.message); }
+}
+async function stop(){
+  try{ await api('/api/stop', {method:'POST'}); toast('已请求停止'); }catch(e){ toast(e.message); }
+}
+
+function startPolling(){
+  if(state.polling) return;
+  state.polling = setInterval(pollStatus, 1500);
+  pollStatus();
+}
+async function pollStatus(){
+  try{
+    const s = await api('/api/status');
+    const p = s.progress||{};
+    $('runDot').className = 'dot ' + (s.running ? 'run' : 'on');
+    $('runText').textContent = s.running ? '运行中' : '已停止';
+    $('pRound').textContent = (p.round||0)+'/'+(p.total_rounds||0);
+    $('pSent').textContent = p.sent||0;
+    $('pFail').textContent = p.failed||0;
+    $('pTotal').textContent = p.total||0;
+    const done = (p.sent||0)+(p.failed||0);
+    $('bar').style.width = p.total ? Math.min(100, done/p.total*100)+'%' : '0%';
+    $('stopBtn').disabled = !s.running;
+    $('startBtn').disabled = s.running;
+    renderLogs(s.logs||[]);
+    if(!s.running && state.polling && done>0){ clearInterval(state.polling); state.polling=null; }
+  }catch(e){ /* 忽略轮询错误 */ }
+}
+let lastLogCount = 0;
+function renderLogs(logs){
+  if(logs.length === lastLogCount) return;
+  lastLogCount = logs.length;
+  const box = $('logs');
+  box.innerHTML = logs.map(l=>`<div class="l"><span class="t">${l.time}</span> <span class="lv-${l.level}">${escapeHtml(l.msg)}</span></div>`).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function checkWechat(){
+  try{
+    const w = await api('/api/wechat');
+    $('wxWarn').style.display = w.found ? 'none' : 'block';
+    return w.found;
+  }catch(e){ return false; }
+}
+
+/* ---------- 事件绑定 ---------- */
+$('mselBtn').addEventListener('click', ()=>{
+  const p = $('mselPanel'), b = $('mselBtn');
+  p.classList.toggle('open'); b.classList.toggle('open');
+  if(p.classList.contains('open')) $('mselSearch').focus();
+});
+document.addEventListener('click', e=>{
+  if(!$('msel').contains(e.target)){
+    $('mselPanel').classList.remove('open'); $('mselBtn').classList.remove('open');
+  }
+});
+$('mselSearch').addEventListener('input', renderList);
+$('selNone').addEventListener('click', ()=>{ state.selected.clear(); renderChips(); renderList(); });
+$('selAllGroups').addEventListener('click', ()=>{
+  state.groups.forEach(g=>state.selected.set(keyOf(g), g));
+  renderChips(); renderList();
+});
+$('accountSel').addEventListener('change', e=>{
+  state.selected.clear(); renderChips();
+  loadContacts(e.target.value);
+});
+$('saveMsgs').addEventListener('click', saveMessages);
+$('reloadMsgs').addEventListener('click', loadMessages);
+// 模式切换：本地即时预览条数，保存时写回后端
+document.querySelectorAll('#modeSeg .seg-item').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    setMode(btn.dataset.mode);
+    previewCount();
+  });
+});
+// 编辑时即时预览条数
+$('msgBox').addEventListener('input', previewCount);
+function previewCount(){
+  const raw = $('msgBox').value.replace(/\r\n/g,'\n');
+  let n = 0;
+  if(curMode === 'separator'){
+    n = raw.split(/\n\s*---\s*\n?/).map(s=>s.replace(/^\n+|\n+$/g,''))
+          .filter(s=>s.trim()).length;
+  }else{
+    n = raw.split('\n').filter(s=>s.trim() && !s.trim().startsWith('#')).length;
+  }
+  setMsgMeta(n, curMode);
+  $('msgCount').textContent = n + ' 条（未保存）';
+}
+$('genPlan').addEventListener('click', genPlan);
+$('startBtn').addEventListener('click', start);
+$('stopBtn').addEventListener('click', stop);
+
+/* ---------- 启动 ---------- */
+async function loadPaths(){
+  try{
+    const p = await api('/api/paths');
+    const el = $('dataRootLine');
+    el.textContent = '用户文件目录：' + p.root + '（data / logs / shots / cache / tmp / runtime）';
+    el.title = JSON.stringify(p, null, 2);
+  }catch(e){ /* 忽略 */ }
+}
+(async ()=>{
+  try{
+    await loadMessages();
+    await loadAccounts();
+    await checkWechat();
+    loadPaths();
+    // 诊断日志：会出现在 logs\electron.log，便于「界面空白」时定位
+    console.log('[wcs] 界面就绪  账号=' + $('accountSel').value
+      + '  群=' + state.groups.length + '  好友=' + state.friends.length
+      + '  消息池=' + $('mPool').textContent);
+  }catch(e){
+    console.error('[wcs] 初始化失败: ' + (e && e.message));
+  }
+  setInterval(checkWechat, 8000);
+  pollStatus();
+  setInterval(()=>{ if(!state.polling) pollStatus(); }, 5000);
+})();
+</script>
+</body>
+</html>
