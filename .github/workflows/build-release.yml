@@ -1,0 +1,119 @@
+name: build-release
+
+# 触发方式：
+#  1) 推送 v* 形式的 tag（例如 v1.0.0）—— 自动构建并发布 Release
+#  2) 手动触发（workflow_dispatch）—— 构建并上传为 Artifact；
+#     勾选 publish_release 才会额外发布 Release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: '同时发布 Release（默认只上传 Artifact 供验证）'
+        type: boolean
+        default: false
+      version:
+        description: '版本号，用于 Release 标签（例如 v1.0.0；留空用 package.json 里的版本）'
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: 云端构建 Windows 安装包
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm install
+        env:
+          # CI 在美国节点，直接用官方源即可（本地开发用 npmmirror，见 build.js）
+          ELECTRON_BUILDER_BINARIES_MIRROR: ''
+
+      - name: 确保 Electron 二进制就绪
+        # npm 11 可能拦截 electron 的 postinstall，导致没有 dist/electron.exe。
+        # 这里显式补跑一次安装脚本，任何 npm 版本下都能拿到二进制。
+        shell: pwsh
+        run: |
+          $exe = 'node_modules/electron/dist/electron.exe'
+          if (Test-Path $exe) {
+            Write-Host "Electron 已就绪: $exe"
+          } else {
+            Write-Host "Electron 二进制缺失，补跑 install.js ..."
+            Push-Location node_modules/electron
+            node install.js
+            Pop-Location
+          }
+          if (-not (Test-Path $exe)) {
+            throw "Electron 二进制仍不可用，无法打包"
+          }
+
+      - name: 打包（NSIS 安装包）
+        run: npm run dist
+        env:
+          ELECTRON_BUILDER_BINARIES_MIRROR: ''
+          # 不签名：没有证书。产物双击时 Windows 会提示「未知发布者」。
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: 列出产物
+        shell: pwsh
+        run: Get-ChildItem dist -File | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize
+
+      - name: 上传 Artifact（每次构建都可用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChatSender-windows-x64
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+          if-no-files-found: error
+
+      - name: 解析版本号
+        id: ver
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'push') {
+            $tag = '${{ github.ref_name }}'
+          } elseif ('${{ inputs.version }}') {
+            $tag = '${{ inputs.version }}'
+          } else {
+            $tag = 'v' + (Get-Content package.json | ConvertFrom-Json).version
+          }
+          Write-Host "Release 标签: $tag"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: 发布 Release
+        # tag 推送时总是发布；手动触发时需要勾选 publish_release
+        if: github.event_name == 'push' || inputs.publish_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: WeChatSender ${{ steps.ver.outputs.tag }}
+          draft: false
+          generate_release_notes: true
+          body: |
+            微信定时群发控制台 —— Windows x64 安装包
+
+            **使用前请注意**
+            - 需要本机已登录微信 4.x（桌面版），并已安装 Python 3.9+
+            - 安装到可写目录（例如 `D:\WeChatSender`），不要装在 `C:\Program Files`
+            - 安装包未做代码签名，Windows 可能提示「未知发布者」
+
+            详见 [README](https://github.com/${{ github.repository }}#readme)
+          files: |
+            dist/*.exe
+            dist/*.blockmap
