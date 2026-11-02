@@ -3,6 +3,12 @@ REM ===================================================================
 REM  Build installers (electron-builder).
 REM  ASCII ONLY - see README section 6.4 (cmd.exe reads .bat with the
 REM  system ANSI codepage; UTF-8 Chinese here desyncs the parser).
+REM
+REM  Usage:
+REM    this script          -> asks for a version (Enter = keep package.json)
+REM    this script 1.2.0    -> build as version 1.2.0
+REM  The version is applied to package.json only for the duration of the
+REM  build and is restored afterwards (see build.js).
 REM ===================================================================
 cd /d "%~dp0"
 
@@ -36,12 +42,27 @@ if not exist "node_modules\electron\dist\electron.exe" (
     echo.
 )
 
+set "VER=%~1"
+if "%VER%"=="" set /p "VER=Version to build (Enter = keep current): "
+
 echo.
-echo [i] Building NSIS installer ...
+if "%VER%"=="" (
+    echo [i] Building NSIS installer with the current version ...
+) else (
+    echo [i] Building NSIS installer as version %VER% ...
+)
 echo     Cache stays inside: %~dp0cache\electron-builder
 echo     Output goes to:     %~dp0dist
 echo.
+
+if "%VER%"=="" goto :build_plain
+node build.js --version %VER% --win --x64
+goto :after_build
+
+:build_plain
 node build.js --win --x64
+
+:after_build
 set RC=%ERRORLEVEL%
 
 echo.

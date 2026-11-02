@@ -56,13 +56,65 @@ fs.mkdirSync(env.ELECTRON_CACHE, { recursive: true });
 
 const args = process.argv.slice(2);
 
+// ---------------------------------------------------------------------------
+// 版本号：支持 node build.js --version 1.2.3 ...
+// electron-builder 的产物名和「应用版本」都取自 package.json 的 version，
+// 之前只能改 package.json 才能换版本，很容易忘。
+// 这里允许命令行指定：构建前临时改 package.json，**构建结束（无论成败）
+// 都原样还原**，不把版本号留在文件里。
+// ---------------------------------------------------------------------------
+const pkgPath = path.join(projectDir, 'package.json');
+const pkgRaw = fs.readFileSync(pkgPath, 'utf8');
+let version = null;
+const rest = [];
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--version') {
+    version = args[++i];
+  } else if (a.startsWith('--version=')) {
+    version = a.slice('--version='.length);
+  } else {
+    rest.push(a);
+  }
+}
+
+let restorePkg = null;
+if (version) {
+  if (!/^\d+\.\d+\.\d+/.test(version)) {
+    process.stderr.write(
+      '\n[build] 版本号格式不对：' + version + '\n' +
+        '        应为 1.2.3 这样的形式，例如：node build.js --version 1.2.0\n\n'
+    );
+    process.exit(1);
+  }
+  const pkg = JSON.parse(pkgRaw);
+  const old = pkg.version;
+  pkg.version = version;
+  fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+  restorePkg = () => fs.writeFileSync(pkgPath, pkgRaw);
+  process.stdout.write('[build] 版本号 ' + old + ' -> ' + version + '（构建后自动还原）\n');
+}
+
+let restored = false;
+function restore() {
+  if (restorePkg && !restored) {
+    restored = true;
+    try {
+      restorePkg();
+    } catch (e) {
+      process.stderr.write('[build] 还原 package.json 失败：' + e.message + '\n');
+    }
+  }
+}
+process.on('exit', restore);
+
 // electron-builder 检测到 CI 环境（或带 tag 构建）时会**自己去发布 Release**，
 // 需要 GH_TOKEN；没配就报
 //   "GitHub Personal Access Token is not set ... using env GH_TOKEN"
 // 而构建其实已经成功。本项目的发布统一交给 CI 里的 action（或手动 gh release），
 // 所以这里默认补 --publish never，除非调用方自己指定了 --publish。
-const hasPublish = args.some((a) => a === '--publish' || a.startsWith('--publish='));
-const finalArgs = hasPublish ? args : [...args, '--publish', 'never'];
+const hasPublish = rest.some((a) => a === '--publish' || a.startsWith('--publish='));
+const finalArgs = hasPublish ? rest : [...rest, '--publish', 'never'];
 
 process.stdout.write('[build] electron-builder 缓存目录: ' + env.ELECTRON_BUILDER_CACHE + '\n');
 process.stdout.write('[build] 二进制镜像: ' + (env.ELECTRON_BUILDER_BINARIES_MIRROR || '(官方源)') + '\n');
@@ -74,8 +126,12 @@ const child = spawn(process.execPath, [cli, ...finalArgs], {
   env,
 });
 
-child.on('close', (code) => process.exit(code === null ? 0 : code));
+child.on('close', (code) => {
+  restore();
+  process.exit(code === null ? 0 : code);
+});
 child.on('error', (err) => {
+  restore();
   process.stderr.write('[build] 启动 electron-builder 失败：' + err.message + '\n');
   process.exit(1);
 });

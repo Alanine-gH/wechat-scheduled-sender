@@ -116,7 +116,9 @@ def _run_plan(plan: dict) -> None:
     RT.running = True
     RT.started_at = time.time()
     try:
-        engine = SendEngine()
+        # 把「是否已请求停止」透给引擎：一次发送最长几十秒，
+        # 只在两条之间判停止会导致「点了停止还在发」（实测停了还在跑 42 秒）。
+        engine = SendEngine(should_stop=lambda: not RT.running)
         RT.log("INFO", "已连接微信窗口 hwnd=%s" % engine.hwnd)
     except Exception as exc:
         RT.log("ERROR", "初始化发送引擎失败: %s" % exc)
@@ -160,6 +162,10 @@ def _run_plan(plan: dict) -> None:
             )
             res = engine.send_to(wxid or display, text, display=display,
                                  username=wxid, shot_path=shot_path)
+            if res.get("cancelled"):
+                # 被停止指令中断，不算失败，也不再继续
+                RT.log("WARN", "已停止：中断于 %s" % display)
+                break
             if res.get("ok"):
                 RT.progress["sent"] += 1
                 tag = "已校验" if res.get("verified") else ("未回读" if wxid else "无wxid")

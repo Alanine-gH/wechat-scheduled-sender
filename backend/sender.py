@@ -28,6 +28,10 @@ except Exception:  # pragma: no cover
     win32gui = None
 
 WECHAT_MAIN_CLASS = "Qt51514QWindowIcon"
+# 注意：类名里的数字是 **Qt 版本**（Qt51514 = Qt 5.15.14，Qt624 = Qt 6.24），
+# 微信换 Qt 版本时这个类名就会变（实测 4.1.15.13 是 Qt51514QWindowIcon）。
+# 所以窗口匹配不能认死一个类名，改为「类名含 QWindowIcon」+ 标题含微信 + 尺寸够大。
+WECHAT_CLASS_HINT = "QWindowIcon"
 WECHAT_TITLE_HINTS = ("微信", "Weixin", "WeChat")
 PW_RENDERFULLCONTENT = 0x00000002
 
@@ -107,7 +111,8 @@ def find_wechat_window(restore: bool = True) -> Optional[int]:
     def _cb(hwnd, _):
         try:
             cls = win32gui.GetClassName(hwnd)
-            if WECHAT_MAIN_CLASS not in cls:
+            # 兼容不同 Qt 版本的类名（Qt51514QWindowIcon / Qt624QWindowIcon …）
+            if WECHAT_CLASS_HINT not in cls or "QWindowTool" in cls:
                 return True
             title = win32gui.GetWindowText(hwnd)
             if not any(x in title for x in WECHAT_TITLE_HINTS):
@@ -377,7 +382,7 @@ class SendEngine:
                 return True
         return False
 
-    def __init__(self, hwnd: Optional[int] = None):
+    def __init__(self, hwnd: Optional[int] = None, should_stop=None):
         # 必须先在当前线程初始化 COM，否则后台线程拿不到控件树
         init_com()
         self.hwnd = hwnd or find_wechat_window()
@@ -386,7 +391,18 @@ class SendEngine:
         self.root = None
         # 最近一次 open_chat 失败的原因（供日志展示，便于定位）
         self.last_open_error: Optional[str] = None
+        # 会话列表找不到目标时的具体原因（翻了几屏、扫了几项）
+        self.last_session_error: Optional[str] = None
+        # 取消回调：一次发送最长可能几十秒，不能只在「两条之间」判停止，
+        # 必须能在发送过程内部被叫停（否则点了停止还会继续发下一条）。
+        self.should_stop = should_stop or (lambda: False)
         self._ensure_uia()
+
+    def cancelled(self) -> bool:
+        try:
+            return bool(self.should_stop())
+        except Exception:
+            return False
 
     def _ensure_uia(self) -> None:
         """确保控件树可用。
@@ -647,65 +663,32 @@ class SendEngine:
         if not kw:
             return False
 
-        # 只有 wxid / 群 id、没有显示名时，不要往搜索框里输 ——
-        # 微信搜索框不认这类 id，只会弹出「搜索网络结果」。
+        # 只有 wxid / 群 id、没有显示名时，无法在会话列表里按名字找
         if kw.endswith("@chatroom") or kw.startswith(("wxid_", "gh_")):
-            self._dismiss_popover()
-            if self._click_session_item(kw) and self._verify_chat(kw, None, timeout):
-                return True
+            self.last_open_error = "只给了 id（%s），没有可用显示名" % kw
             return False
 
-        self._dismiss_popover()
+        if self.cancelled():
+            self.last_open_error = "已取消"
+            return False
 
-        # 1) 会话列表里直接命中（最快，也最不容易出错）
-        if self._click_session_item(kw) and self._verify_chat(kw, display, timeout):
-            return True
-
-        # 2) 本地搜索：逐个候选关键词试。
-        #    微信搜索框对长名字 / emoji / 特殊符号很不友好 —— 群名里带
-        #    【】&1️⃣ 时整名经常搜不到，所以先拿「归一化后的短关键词」检索，
-        #    再对结果行做模糊匹配。短词没命中就换尾部、再换完整名。
-        last_err = None
-        for key in search_keys(kw):
-            try:
-                box = self._ensure_search_box()
-                if box is None:
-                    last_err = "搜索框不可用（可能被折叠）"
-                    break
-                box.SetFocus()
-                time.sleep(0.2)
-                box.SendKeys("{Ctrl}a", waitTime=0.05)
-                box.SendKeys("{Delete}", waitTime=0.05)
-                time.sleep(0.25)
-                box.SendKeys(key, waitTime=0.05)
-                time.sleep(1.5)
-            except Exception as exc:
-                last_err = "输入关键词失败: %s" % exc
-                continue
-
-            lst = self._search_list()
-            if lst is None:
-                last_err = "搜索结果面板未出现"
-                continue
-
-            chats, _has_network = self._search_row_split(lst)
-            pick = self._pick_best_row(chats, kw, key)
-            if pick is None:
-                last_err = "关键词 %r 的结果里没有可靠匹配" % key
-                continue
-
-            try:
-                pick.Click()
-            except Exception:
-                pass
-            time.sleep(1.3)
-            if self._verify_chat(key, display, timeout):
+        # 1) 会话列表里直接命中（唯一可靠路径，见下方说明）
+        clicked = self._click_session_item(kw)
+        if clicked:
+            if self._verify_chat(kw, display, timeout):
                 return True
-            last_err = "点了 %r 对应行，但会话标题校验没过" % key
+            self.last_open_error = "点中了「%s」，但会话没有切换过去" % kw
+            return False
 
-        # 失败：清场，避免把搜一搜面板留在界面上影响下一条
-        self._escape_panels()
-        self.last_open_error = last_err
+        # 2) 不再走搜索浮层。
+        #    微信 4.2.0.11 实测：点搜索结果行打开的是「搜一搜 / 视频号」面板
+        #    （一屏公众号文章），不是会话切换；Invoke、选中、回车同样
+        #    都切不过去。硬点只会把界面搞乱、还留下一个无关面板。
+        #    所以打开会话**只走会话列表** —— 它包含全部会话（按最近排序），
+        #    配合 PageDown 翻页足以覆盖目标。
+        self.last_open_error = getattr(self, "last_session_error", None) or (
+            "会话列表里没找到「%s」。请先在微信里手动打开一次该群，"
+            "或把它置顶，让它出现在列表靠前的位置。" % kw)
         return False
 
     def _pick_best_row(self, chats, display: str, key: str):
@@ -777,8 +760,10 @@ class SendEngine:
         """
         lst = self._session_list()
         if lst is None:
+            self.last_session_error = "会话列表不可用（控件树可能没实体化）"
             return False
         want = normalize_name(target)
+        scanned = 0
 
         # 先把列表回到顶部再往下找。
         # 打开会话会让它跳到列表最前，所以每次查找都必须从头开始，
@@ -792,10 +777,15 @@ class SendEngine:
             pass
 
         for _round in range(max_scroll + 1):
+            if self.cancelled():
+                self.last_session_error = "已取消"
+                return False
             try:
                 items = lst.GetChildren()
             except Exception:
+                self.last_session_error = "读取会话列表失败"
                 return False
+            scanned += len(items)
             for it in items:
                 try:
                     aid = it.AutomationId or ""
@@ -822,6 +812,9 @@ class SendEngine:
             if not self._scroll_session_list(lst):
                 break
             time.sleep(0.6)
+        self.last_session_error = (
+            "会话列表翻了 %d 屏、共扫过 %d 项，没找到「%s」"
+            % (max_scroll, scanned, target))
         return False
 
     def _verify_chat(self, kw: str, display: Optional[str], timeout: float = 12.0) -> bool:
@@ -970,9 +963,25 @@ class SendEngine:
         """
         res: Dict[str, Any] = {"target": display or target, "ok": False}
         try:
+            # 取消检查要放在最前面：一条发送最长可能几十秒，
+            # 点了停止之后绝不能还继续往下发。
+            if self.cancelled():
+                res["error"] = "已取消"
+                res["cancelled"] = True
+                return res
+
             if not self.open_chat(target, display=display):
+                if self.cancelled():
+                    res["error"] = "已取消"
+                    res["cancelled"] = True
+                    return res
                 res["error"] = "打开会话失败：%s" % (
                     self.last_open_error or "未能校验目标（可能重名或名称变更）")
+                return res
+
+            if self.cancelled():
+                res["error"] = "已取消"
+                res["cancelled"] = True
                 return res
 
             triggered = self.send_text(text)
@@ -985,7 +994,8 @@ class SendEngine:
             res["cleared"] = cleared
 
             verified = False
-            if verify and username:
+            # 回读校验也要能被取消叫停（它最长等 8 秒）
+            if verify and username and not self.cancelled():
                 verified = self.verify_in_db(username, text)
             res["verified"] = verified
 
