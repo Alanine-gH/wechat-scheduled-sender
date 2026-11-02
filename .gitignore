@@ -59,3 +59,16 @@ _*.py
 _*.js
 _*.ps1
 _*.txt
+
+# --- 库自带的日志（本项目自己记日志，这里防它偶发落在根目录）---
+wechatauto_logs/
+@AutomationLog.txt
+
+# --- 宣传视频的中间产物（体积大且可重新生成，见 宣传视频/工程/制作视频.py）---
+宣传视频/工程/clip*.mp4
+宣传视频/工程/joined.mp4
+宣传视频/工程/voice*.wav
+宣传视频/工程/voice*.mp3
+宣传视频/工程/原创科技节奏.wav
+宣传视频/工程/captions.ass
+宣传视频/工程/concat.txt
