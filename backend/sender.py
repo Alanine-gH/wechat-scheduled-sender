@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import ctypes
+import difflib
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +30,45 @@ except Exception:  # pragma: no cover
 WECHAT_MAIN_CLASS = "Qt51514QWindowIcon"
 WECHAT_TITLE_HINTS = ("微信", "Weixin", "WeChat")
 PW_RENDERFULLCONTENT = 0x00000002
+
+
+# ---------------------------------------------------------------------------
+# 名称归一化：微信搜索框对长名字 / emoji / 特殊符号很不友好
+# ---------------------------------------------------------------------------
+# 去掉空白、零宽字符、emoji、以及各种中英文装饰符号。
+# 群名里常见的 【】& 1️⃣ 之类会让「整名搜索」搜不到，
+# 所以改成「用归一化后的短关键词检索，再用模糊匹配认行」。
+_STRIP_RE = re.compile(
+    r"[\s\u200b-\u200f\u2028-\u202f\u20d0-\u20ff\u2600-\u27bf\ufe0e\ufe0f"
+    r"\U0001F000-\U0001FAFF"
+    r"【】\[\]（）()<>《》「」『』·、，,。.：:；;！!？?…\-—_=+*#@/\\|~^&%$'\"`^]+"
+)
+
+
+def normalize_name(s: Optional[str]) -> str:
+    """把名称压成「只剩实义字符」的形式，用于搜索与比较。"""
+    return _STRIP_RE.sub("", s or "")
+
+
+def search_keys(name: str, max_len: int = 6) -> List[str]:
+    """给一个显示名，产出若干个检索词（按可用性排序）。
+
+    优先用归一化后的前几个字（区分度通常最高）；不行再试尾部和原文。
+    """
+    norm = normalize_name(name)
+    out: List[str] = []
+    cands = []
+    if norm:
+        cands.append(norm[:max_len])
+        if len(norm) > max_len:
+            cands.append(norm[-max_len:])
+        cands.append(norm)
+    cands.append((name or "")[:max_len])
+    for k in cands:
+        k = (k or "").strip()
+        if k and k not in out:
+            out.append(k)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +288,8 @@ class SendEngine:
         if not self.hwnd:
             raise RuntimeError("未找到微信主窗口，请先启动并登录微信")
         self.root = None
+        # 最近一次 open_chat 失败的原因（供日志展示，便于定位）
+        self.last_open_error: Optional[str] = None
         self._ensure_uia()
 
     def _ensure_uia(self) -> None:
@@ -261,30 +304,41 @@ class SendEngine:
             raise RuntimeError("无法附加到微信窗口")
 
     # -- 控件查找 ----------------------------------------------------------
-    def _search_box(self, min_width: int = 40):
+    def _search_box(self, min_width: int = 24):
         """取搜索输入框；不可用时返回 None（不抛异常）。
 
-        搜索框会「缩起来」，两种情形都要挡住：
-          * 微信窗口变窄、或拖动分隔条把会话列表压窄时，搜索框会折叠成
-            只剩一个放大镜图标 —— 此时 ``XValidatorTextEdit`` 根本不存在；
-          * 也可能还存在但宽度只剩几像素，``SendKeys`` 打不进字，
-            却会让调用方以为「已经输入了关键词」。
-        所以既不能抛异常，也要拒绝宽度过小的控件。
+        微信 4.2.x 起搜索框控件可能换了类名，所以**不认死一个类名**，
+        按可靠性依次尝试多种定位方式。
+
+        另外搜索框会「缩起来」：窗口变窄、或拖动分隔条把会话列表压窄时，
+        会折叠成只剩一个放大镜图标。这种控件宽度接近 0，
+        SendKeys 打不进字却会让调用方以为「已经输入了关键词」，所以要拒绝。
         """
+        cands = []
         try:
-            ed = self.root.EditControl(searchDepth=30,
-                                       ClassName="mmui::XValidatorTextEdit")
-            if not ed.Exists(0.3):
-                return None
-            try:
-                r = ed.BoundingRectangle
-                if (r.right - r.left) < min_width or (r.bottom - r.top) < 10:
-                    return None
-            except Exception:
-                pass
-            return ed
+            cands.append(self.root.EditControl(
+                searchDepth=30, ClassName="mmui::XValidatorTextEdit"))
+            # 4.2.x 备选：按 AutomationId 找
+            for aid in ("search_input", "search_field", "search_edit"):
+                cands.append(self.root.EditControl(searchDepth=30, AutomationId=aid))
+            # 再备选：搜索容器里的任意 EditControl
+            sf = self.root.GroupControl(searchDepth=30, ClassName="mmui::XSearchField")
+            if sf.Exists(0.2):
+                cands.append(sf.EditControl(searchDepth=6))
         except Exception:
             return None
+
+        for ed in cands:
+            try:
+                if ed is None or not ed.Exists(0.25):
+                    continue
+                r = ed.BoundingRectangle
+                if (r.right - r.left) < min_width or (r.bottom - r.top) < 10:
+                    continue
+                return ed
+            except Exception:
+                continue
+        return None
 
     def _ensure_search_box(self, timeout: float = 6.0):
         """尽最大努力拿到可用的搜索框，失败返回 None。
@@ -460,84 +514,156 @@ class SendEngine:
         if self._click_session_item(kw) and self._verify_chat(kw, display, timeout):
             return True
 
-        # 2) 本地搜索。搜索框可能被折叠/消失（窗口变窄、分隔条压窄），
-        #    这里不抛异常，尽力唤出；实在拿不到就只靠会话列表，直接失败。
-        box = self._ensure_search_box()
-        if box is None:
-            self._escape_panels()
-            return False
-
-        try:
-            box.SetFocus()
-            time.sleep(0.2)
-            box.SendKeys("{Ctrl}a", waitTime=0.05)
-            box.SendKeys("{Delete}", waitTime=0.05)
-            time.sleep(0.25)
-            box.SendKeys(kw, waitTime=0.05)
-            time.sleep(1.5)
-        except Exception:
-            self._escape_panels()
-            return False
-
-        lst = self._search_list()
-        if lst is not None:
-            chats, has_network = self._search_row_split(lst)
-
-            # 只接受精确匹配；否则要求唯一的包含匹配，避免点错重名的人
-            pick = None
-            for nm, it in chats:
-                if nm == kw:
-                    pick = it
+        # 2) 本地搜索：逐个候选关键词试。
+        #    微信搜索框对长名字 / emoji / 特殊符号很不友好 —— 群名里带
+        #    【】&1️⃣ 时整名经常搜不到，所以先拿「归一化后的短关键词」检索，
+        #    再对结果行做模糊匹配。短词没命中就换尾部、再换完整名。
+        last_err = None
+        for key in search_keys(kw):
+            try:
+                box = self._ensure_search_box()
+                if box is None:
+                    last_err = "搜索框不可用（可能被折叠）"
                     break
+                box.SetFocus()
+                time.sleep(0.2)
+                box.SendKeys("{Ctrl}a", waitTime=0.05)
+                box.SendKeys("{Delete}", waitTime=0.05)
+                time.sleep(0.25)
+                box.SendKeys(key, waitTime=0.05)
+                time.sleep(1.5)
+            except Exception as exc:
+                last_err = "输入关键词失败: %s" % exc
+                continue
+
+            lst = self._search_list()
+            if lst is None:
+                last_err = "搜索结果面板未出现"
+                continue
+
+            chats, _has_network = self._search_row_split(lst)
+            pick = self._pick_best_row(chats, kw, key)
             if pick is None:
-                cands = [(nm, it) for nm, it in chats if kw in nm or nm in kw]
-                if len(cands) == 1:
-                    pick = cands[0][1]
+                last_err = "关键词 %r 的结果里没有可靠匹配" % key
+                continue
 
-            if pick is not None:
-                try:
-                    pick.Click()
-                except Exception:
-                    pass
-                time.sleep(1.3)
-                if self._verify_chat(kw, display, timeout):
-                    return True
-
-            if has_network and not chats:
-                # 只有「搜索网络结果」这一行 —— 说明本地没有这个会话。
-                # 绝对不要点它，点了就是搜一搜面板。
+            try:
+                pick.Click()
+            except Exception:
                 pass
+            time.sleep(1.3)
+            if self._verify_chat(key, display, timeout):
+                return True
+            last_err = "点了 %r 对应行，但会话标题校验没过" % key
 
         # 失败：清场，避免把搜一搜面板留在界面上影响下一条
         self._escape_panels()
+        self.last_open_error = last_err
         return False
 
-    def _click_session_item(self, target: str) -> bool:
+    def _pick_best_row(self, chats, display: str, key: str):
+        """从搜索结果里挑出与目标最匹配的一行；不确定时返回 None。
+
+        **宁可失败也不点错** —— 点错群的代价是把消息发到别人的群里。
+        所以：归一化后完全相同 → 直接选；否则取相似度最高且明显领先的一行；
+        若有两行分数接近（典型的「一堆相似群名」），放弃。
+        """
+        dn = normalize_name(display)
+        scored = []
+        for nm, it in chats:
+            rn = normalize_name(nm)
+            if not rn:
+                continue
+            if dn and rn == dn:
+                score = 1.0
+            elif dn and (dn in rn or rn in dn):
+                score = 0.92
+            else:
+                score = difflib.SequenceMatcher(None, dn or key, rn).ratio()
+            scored.append((score, nm, it))
+
+        if not scored:
+            return None
+        scored.sort(key=lambda x: -x[0])
+        best = scored[0]
+        if best[0] < 0.60:
+            return None
+        if len(scored) > 1 and (best[0] - scored[1][0]) < 0.06:
+            return None
+        return best[2]
+
+    def _scroll_session_list(self, lst) -> bool:
+        """把会话列表往下翻一屏（语义滚动优先，不依赖坐标）。"""
+        try:
+            sp = lst.GetScrollPattern()
+            if sp is not None:
+                sp.Scroll(auto.ScrollAmount.NoAmount,
+                          auto.ScrollAmount.LargeIncrement)
+                return True
+        except Exception:
+            pass
+        # 退化：把鼠标移到列表自身的中心再滚轮（位置取自控件矩形，不是写死的坐标）
+        try:
+            r = lst.BoundingRectangle
+            if (r.right - r.left) > 10 and (r.bottom - r.top) > 10:
+                lst.SetFocus()
+                auto.WheelDown(wheelTimes=5, waitTime=0.1)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _click_session_item(self, target: str, max_scroll: int = 4) -> bool:
+        """在会话列表里找目标并点开。
+
+        会话列表只渲染可见的若干行，目标可能被压在下面；搜索框又可能
+        被折叠/换类名拿不到，所以这里支持**滚动若干屏**继续找，
+        避免「搜索不可用就整条失败」。
+
+        名称比较同时用原文与归一化形式，兼容群名里的 emoji / 符号。
+        """
         lst = self._session_list()
         if lst is None:
             return False
-        try:
-            items = lst.GetChildren()
-        except Exception:
-            return False
-        for it in items:
+        want = normalize_name(target)
+
+        for _round in range(max_scroll + 1):
             try:
-                aid = it.AutomationId or ""
-                name = (it.Name or "").split("\n")[0].strip()
-                if aid == "session_item_%s" % target or name == target:
+                items = lst.GetChildren()
+            except Exception:
+                return False
+            for it in items:
+                try:
+                    aid = it.AutomationId or ""
+                    name = (it.Name or "").split("\n")[0].strip()
+                    hit = (aid == "session_item_%s" % target or name == target)
+                    if not hit and want and len(want) >= 4:
+                        hit = normalize_name(name) == want
+                    if not hit:
+                        continue
                     try:
                         it.GetInvokePattern().Invoke()
                     except Exception:
                         it.Click()
                     time.sleep(1.2)
                     return True
-            except Exception:
-                continue
+                except Exception:
+                    continue
+            if not self._scroll_session_list(lst):
+                break
+            time.sleep(0.6)
         return False
 
     def _verify_chat(self, kw: str, display: Optional[str], timeout: float = 12.0) -> bool:
-        """校验当前会话是否为目标（防止重名发错）。"""
+        """校验当前会话是否为目标（防止重名发错）。
+
+        搜索关键词往往是「去掉符号后的短片段」（例如用「代博会浦飞出海」去找
+        群名「【代博会】浦飞出海&会计工厂1️⃣」），所以除了原文比较，
+        还要把两边都归一化后再比一次，否则命中了也认不出来。
+        """
         names = [n for n in (kw, display) if n]
+        norms = [normalize_name(n) for n in names]
+        norms = [d for d in norms if d]
         deadline = time.time() + timeout
         while time.time() < deadline:
             cur = self.current_chat_name()
@@ -545,6 +671,14 @@ class SendEngine:
                 for n in names:
                     if n in cur or cur in n:
                         return True
+                cn = normalize_name(cur)
+                if cn:
+                    for d in norms:
+                        if d == cn:
+                            return True
+                        # 片段匹配要求至少 4 个字，避免过短关键词误判
+                        if len(d) >= 4 and (d in cn or cn in d):
+                            return True
             time.sleep(0.4)
         return False
 
@@ -667,7 +801,8 @@ class SendEngine:
         res: Dict[str, Any] = {"target": display or target, "ok": False}
         try:
             if not self.open_chat(target, display=display):
-                res["error"] = "打开会话失败或未能校验目标（可能重名或名称变更）"
+                res["error"] = "打开会话失败：%s" % (
+                    self.last_open_error or "未能校验目标（可能重名或名称变更）")
                 return res
 
             triggered = self.send_text(text)
