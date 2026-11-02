@@ -261,8 +261,99 @@ class SendEngine:
             raise RuntimeError("无法附加到微信窗口")
 
     # -- 控件查找 ----------------------------------------------------------
-    def _search_box(self):
-        return self.root.EditControl(searchDepth=30, ClassName="mmui::XValidatorTextEdit")
+    def _search_box(self, min_width: int = 40):
+        """取搜索输入框；不可用时返回 None（不抛异常）。
+
+        搜索框会「缩起来」，两种情形都要挡住：
+          * 微信窗口变窄、或拖动分隔条把会话列表压窄时，搜索框会折叠成
+            只剩一个放大镜图标 —— 此时 ``XValidatorTextEdit`` 根本不存在；
+          * 也可能还存在但宽度只剩几像素，``SendKeys`` 打不进字，
+            却会让调用方以为「已经输入了关键词」。
+        所以既不能抛异常，也要拒绝宽度过小的控件。
+        """
+        try:
+            ed = self.root.EditControl(searchDepth=30,
+                                       ClassName="mmui::XValidatorTextEdit")
+            if not ed.Exists(0.3):
+                return None
+            try:
+                r = ed.BoundingRectangle
+                if (r.right - r.left) < min_width or (r.bottom - r.top) < 10:
+                    return None
+            except Exception:
+                pass
+            return ed
+        except Exception:
+            return None
+
+    def _ensure_search_box(self, timeout: float = 6.0):
+        """尽最大努力拿到可用的搜索框，失败返回 None。
+
+        依次尝试：
+          1. 直接找（搜索框正常展开时命中）
+          2. Ctrl+F —— 微信的「搜索」快捷键，会把搜索框唤出并聚焦
+          3. 点 ``mmui::XSearchField`` 容器（把折叠状态展开）
+          4. 点容器里的放大镜图标按钮
+        每一步之后都重新检查一次，全部失败才放弃。
+        """
+        deadline = time.time() + timeout
+
+        def ok():
+            box = self._search_box()
+            return box if box is not None and box.Exists(0.2) else None
+
+        box = ok()
+        if box is not None:
+            return box
+
+        attempts = (
+            ("Ctrl+F 唤出搜索", lambda: auto.SendKeys("{Ctrl}f", waitTime=0.15)),
+            ("点击搜索框容器", lambda: self._click_search_field()),
+            ("点击放大镜图标", lambda: self._click_search_icon()),
+        )
+        for name, act in attempts:
+            if time.time() >= deadline:
+                break
+            try:
+                act()
+            except Exception:
+                pass
+            time.sleep(0.9)
+            box = ok()
+            if box is not None:
+                return box
+
+        # 最后再等一等（有些布局要等动画结束才把 EditControl 渲染出来）
+        while time.time() < deadline:
+            box = ok()
+            if box is not None:
+                return box
+            time.sleep(0.3)
+        return None
+
+    def _search_field_container(self):
+        c = self.root.GroupControl(searchDepth=30, ClassName="mmui::XSearchField")
+        return c if c.Exists(0.3) else None
+
+    def _click_search_field(self) -> None:
+        c = self._search_field_container()
+        if c is not None:
+            try:
+                c.Click()
+            except Exception:
+                pass
+
+    def _click_search_icon(self) -> None:
+        c = self._search_field_container()
+        if c is None:
+            return
+        try:
+            for ch in c.GetChildren():
+                if ch.ControlTypeName == "ButtonControl":
+                    ch.Click()
+                    return
+        except Exception:
+            pass
 
     def _search_list(self):
         lst = self.root.ListControl(searchDepth=30, AutomationId="search_list")
@@ -302,12 +393,11 @@ class SendEngine:
     def _dismiss_popover(self) -> None:
         """确保搜索浮层是干净的。
 
-        搜索框存在只说明「聊天页可搜索」，不代表没有别的面板盖着；
-        所以先 Esc 收干净，再确认搜索框可用。
+        先 Esc 收干净，再确认能拿到搜索框；拿不到就切回「微信」标签页
+        （停在通讯录/朋友圈等页面时本来就没有搜索框）。
         """
         self._escape_panels(2)
-        if not self._search_box().Exists(0.3):
-            # 可能停在通讯录等页面，切回微信标签再试
+        if self._search_box() is None:
             try:
                 tab = self.root.ButtonControl(searchDepth=30, Name="微信")
                 if tab.Exists(0.4):
@@ -370,11 +460,13 @@ class SendEngine:
         if self._click_session_item(kw) and self._verify_chat(kw, display, timeout):
             return True
 
-        box = self._search_box()
-        if not box.Exists(0.5):
-            raise RuntimeError("未找到搜索框，控件树可能不完整")
+        # 2) 本地搜索。搜索框可能被折叠/消失（窗口变窄、分隔条压窄），
+        #    这里不抛异常，尽力唤出；实在拿不到就只靠会话列表，直接失败。
+        box = self._ensure_search_box()
+        if box is None:
+            self._escape_panels()
+            return False
 
-        # 2) 本地搜索
         try:
             box.SetFocus()
             time.sleep(0.2)

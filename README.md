@@ -256,6 +256,15 @@ app.setPath('logs',       <安装目录>/logs);
 6. **就绪检查不能只数 `mmui::` 控件且层级太浅**。`mmui::MainView` 本身就在第 4 层
    （窗口 → Pane → QWidget → QStackedWidget → MainView），只数到第 4 层计数过少，
    会把「已就绪」误判成「gate 未生效」。现在优先按 `AutomationId=MainView` 判定。
+7. **搜索框会「缩起来」，此时不能当成致命错误**。微信窗口变窄、或拖动分隔条把
+   会话列表压窄时，搜索输入框会折叠成只剩一个放大镜图标，
+   `mmui::XValidatorTextEdit` 直接不存在；也可能还存在但宽度只剩几像素，
+   `SendKeys` 打不进字却让调用方以为「已经输入了关键词」。
+   早期实现遇到这种情况会 `raise RuntimeError`，整条目标直接失败。
+   现在改为：`_search_box()` 不抛异常（并校验宽度 ≥ 40px），
+   `_ensure_search_box()` 依次尝试「直接找 → `Ctrl+F` 唤出 → 点 `mmui::XSearchField`
+   容器 → 点容器里的放大镜图标」，全部失败才放弃，且放弃时只让这一个目标失败，
+   不会打断整轮任务。
 
 ### 5.3 好友 vs 群聊（重要）
 
