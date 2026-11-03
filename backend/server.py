@@ -72,6 +72,30 @@ def read_mode() -> str:
     return planner.MODE_LINE
 
 
+def read_settings() -> dict:
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def schedule_config() -> Dict[str, Any]:
+    """调度配置：起始时刻 / 钩子延迟 / 每周上限 / 允许投放的星期。
+
+    没配过就用 scheduler 的默认值（方案给的：20:00、30 分钟、周二四六）。
+    """
+    s = read_settings()
+    return {
+        "start_at": s.get("start_at") or scheduler.DEFAULT_START_AT,
+        "hook_delay_minutes": float(s.get("hook_delay_minutes")
+                                    or scheduler.DEFAULT_HOOK_DELAY_MIN),
+        "weekly_cap": int(s.get("weekly_cap") or scheduler.DEFAULT_WEEKLY_CAP),
+        "hook_days": s.get("hook_days") or list(campaign_mod.DEFAULT_HOOK_DAYS),
+        "run_days": s.get("run_days") or [],
+    }
+
+
 def write_settings(**kw) -> None:
     data = {}
     try:
@@ -351,6 +375,17 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/wechat":
                 h = find_wechat_window()
                 return self._json({"found": bool(h), "hwnd": h})
+            if p == "/api/campaign":
+                # 内容编排预览：各天引导语、正文、钩子 + 当前调度配置 + 本周计数
+                detail = campaign_mod.load_campaign_detail(CAMPAIGN_FILE)
+                detail.update(schedule_config())
+                detail["week"] = scheduler.week_key()
+                detail["state"] = scheduler.load_state(DATA_DIR).get(
+                    "weekly", {}).get(scheduler.week_key(), {})
+                return self._json({"ok": True, **detail})
+            if p == "/api/schedule":
+                # 读取当前调度配置
+                return self._json({"ok": True, **schedule_config()})
             if p.startswith("/shots/"):
                 rel = os.path.normpath(p[len("/shots/"):]).replace("..", "")
                 return self._file(os.path.join(SHOT_DIR, rel), "image/png")
@@ -417,22 +452,41 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get("campaign"):
                     camp_path = body.get("campaign_file") or CAMPAIGN_FILE
                     camp = campaign_mod.load_campaign(camp_path)
+                    cfg = schedule_config()
+                    # body 里的值优先，没给就用配置里的
+                    start_at = body.get("start_at") or cfg["start_at"]
+                    hook_delay = float(body.get("hook_delay_min")
+                                       or cfg["hook_delay_minutes"])
+                    hook_days = body.get("hook_days") or cfg["hook_days"]
+                    weekly_cap = int(body.get("weekly_cap")
+                                     if body.get("weekly_cap") is not None
+                                     else cfg["weekly_cap"])
+                    run_days = body.get("run_days") or cfg.get("run_days") or []
                     plan = planner.build_campaign_plan(
                         targets=targets,
                         campaign_obj=camp,
-                        start_at=body.get("start_at") or scheduler.DEFAULT_START_AT,
+                        start_at=start_at,
                         interval_min=float(body.get("interval_min")
                                            or planner.DEFAULT_INTERVAL_MIN),
                         interval_max=float(body.get("interval_max")
                                            or planner.DEFAULT_INTERVAL_MAX),
-                        hook_delay_min=float(body.get("hook_delay_min")
-                                             or scheduler.DEFAULT_HOOK_DELAY_MIN),
-                        hook_days=body.get("hook_days"),
+                        hook_delay_min=hook_delay,
+                        hook_days=hook_days,
                         media_by_target=media_by_target,
-                        weekly_cap=int(body.get("weekly_cap")
-                                       or scheduler.DEFAULT_WEEKLY_CAP),
+                        weekly_cap=weekly_cap,
                         data_dir=DATA_DIR,
                     )
+                    # 「只在指定星期执行」：今天不在名单里就产出空计划并说明原因
+                    plan["run_days"] = run_days
+                    if run_days and plan.get("weekday") not in run_days:
+                        plan["events"] = []
+                        plan["total_messages"] = 0
+                        plan["main_count"] = 0
+                        plan["hook_count"] = 0
+                        plan["blocked_reason"] = (
+                            "今天是%s，不在允许投放的星期（%s）里"
+                            % (plan.get("weekday_cn"),
+                               "、".join(run_days)))
                     plan["media"] = media_mod.describe(media_items) if media_items else None
                     plan["campaign_file"] = camp_path
                     RT.plan = plan
@@ -457,14 +511,38 @@ class Handler(BaseHTTPRequestHandler):
                 items = media_mod.collect(spec)
                 return self._json({"ok": True, "media": media_mod.describe(items)})
 
-            if p == "/api/campaign":
-                # 内容编排预览：各天引导语、正文、钩子、每周频次
-                detail = campaign_mod.load_campaign_detail(CAMPAIGN_FILE)
-                detail["weekly_cap"] = int(scheduler.DEFAULT_WEEKLY_CAP)
-                detail["hook_days"] = detail.get("campaign", {}).get("hook_days")
-                detail["start_at"] = scheduler.DEFAULT_START_AT
-                detail["hook_delay_minutes"] = scheduler.DEFAULT_HOOK_DELAY_MIN
-                return self._json({"ok": True, **detail})
+            if p == "/api/schedule":
+                body = body or {}
+                # 保存调度配置（只写认识的字段，避免脏数据）
+                patch: Dict[str, Any] = {}
+                if "start_at" in body:
+                    h, m = scheduler.parse_hhmm(body.get("start_at"))
+                    patch["start_at"] = "%02d:%02d" % (h, m)
+                if "hook_delay_minutes" in body:
+                    patch["hook_delay_minutes"] = max(
+                        0.0, float(body.get("hook_delay_minutes") or 0))
+                if "weekly_cap" in body:
+                    patch["weekly_cap"] = max(0, int(body.get("weekly_cap") or 0))
+                if "hook_days" in body:
+                    days = [str(d).lower() for d in (body.get("hook_days") or [])]
+                    patch["hook_days"] = [
+                        d for d in days if d in scheduler.WEEKDAY_KEYS]
+                if "run_days" in body:
+                    days = [str(d).lower() for d in (body.get("run_days") or [])]
+                    patch["run_days"] = [
+                        d for d in days if d in scheduler.WEEKDAY_KEYS]
+                if patch:
+                    write_settings(**patch)
+                cfg = schedule_config()
+                return self._json({"ok": True, **cfg})
+
+            if p == "/api/schedule/reset":
+                # 清空本周投放计数（比如手动重跑当天）
+                state = scheduler.load_state(DATA_DIR)
+                wk = scheduler.week_key()
+                (state.get("weekly") or {}).pop(wk, None)
+                scheduler.save_state(DATA_DIR, state)
+                return self._json({"ok": True, "week": wk})
 
             if p == "/api/start":
                 if RT.running:
