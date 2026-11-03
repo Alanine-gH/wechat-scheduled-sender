@@ -389,7 +389,34 @@
       <div class="preview" id="leadsBox" style="display:none;margin-top:12px"></div>
     </section>
 
-    <section class="card rise full" style="animation-delay:.25s">
+    <section class="card rise full" style="animation-delay:.26s">
+      <h2>6 · 设置</h2>
+      <p class="hint">全部设置集中在这里，按分组展示。改动直接写入本地
+        <code>data/settings.json</code>，非法值会被拒绝并告诉你原因。</p>
+
+      <div class="row" style="margin-bottom:10px">
+        <button class="btn" id="reloadSettings" type="button">重新读取</button>
+        <button class="btn primary" id="saveSettings" type="button">保存全部改动</button>
+        <button class="btn" id="resetSettings" type="button">恢复默认值</button>
+        <button class="btn" id="cleanupNow" type="button">立即清理截图与日志</button>
+        <span class="pill" id="settingsMsg">–</span>
+      </div>
+
+      <div id="settingsBox"></div>
+
+      <h3 style="margin:18px 0 6px;font-size:13px">自动运行</h3>
+      <p class="hint" style="margin-top:0">把当前勾选的群/好友存成自动任务，
+        程序常驻时到点自动执行，不用每天手动点。</p>
+      <div class="row" style="margin-bottom:10px">
+        <button class="btn primary" id="saveAutoTargets" type="button">把当前选择存为自动任务</button>
+        <button class="btn" id="autoRunNow" type="button">立刻跑一轮</button>
+        <button class="btn" id="autoResetDay" type="button">清「今天已跑」标记</button>
+        <button class="btn" id="reloadAuto" type="button">刷新状态</button>
+      </div>
+      <div class="note" id="autoBox" style="display:block">–</div>
+    </section>
+
+    <section class="card rise full" style="animation-delay:.28s">
       <h2>运行日志</h2>
       <p class="hint">截图保存在 shots/&lt;日期&gt;/ 目录下</p>
       <div class="logs" id="logs"><div class="l"><span class="t">等待开始…</span></div></div>
@@ -750,6 +777,9 @@ async function saveSchedule(){
       })});
     applySchedule(c);
     toast('调度配置已保存');
+    // 2.7 与「6 · 设置」写的是同一份配置，保存后同步刷新设置面板，
+    // 否则两处显示会不一致，用户会以为没存上
+    loadSettings().catch(()=>{});
   }catch(e){ toast('保存失败：'+e.message); }
 }
 
@@ -851,6 +881,167 @@ async function loadReport(){
     txt += ' ' + (d.note || '');
     tip.textContent = txt;
   }catch(e){ /* 周报可选，失败不打扰 */ }
+}
+
+/* ---------- 设置面板 ---------- */
+let settingsSchema = [];   // 后端给的表单描述，保存时按它取类型
+
+function settingsField(s){
+  const id = 'set_' + s.key;
+  const help = s.help ? `<div class="k" style="margin-top:2px">${escapeHtml(s.help)}</div>` : '';
+  let ctl = '';
+  if(s.type === 'bool'){
+    ctl = `<label class="chk" style="margin:0">
+      <input type="checkbox" id="${id}" data-key="${s.key}" data-type="bool"
+        ${s.value ? 'checked' : ''}><span></span></label>`;
+  }else if(s.type === 'number'){
+    ctl = `<input type="number" id="${id}" data-key="${s.key}" data-type="number"
+      value="${s.value}" min="${s.min ?? ''}" max="${s.max ?? ''}"
+      step="${s.step ?? 'any'}" style="width:120px">`;
+  }else if(s.type === 'time'){
+    ctl = `<input type="time" id="${id}" data-key="${s.key}" data-type="time"
+      value="${s.value}" style="width:120px">`;
+  }else if(s.type === 'weekdays'){
+    const on = s.value || [];
+    ctl = WEEKDAYS.map(([k,cn])=>`<label class="chk" style="display:inline-flex;margin:0 6px 0 0">
+      <input type="checkbox" data-key="${s.key}" data-type="weekdays" data-day="${k}"
+        ${on.includes(k)?'checked':''}><span>${cn}</span></label>`).join('');
+  }else if(s.type === 'list'){
+    const txt = (s.value||[]).join('\n');
+    ctl = `<textarea id="${id}" data-key="${s.key}" data-type="list" rows="3"
+      style="width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);
+      border-radius:8px">${escapeHtml(txt)}</textarea>`;
+  }else{
+    ctl = `<input type="text" id="${id}" data-key="${s.key}" data-type="text"
+      value="${escapeHtml(String(s.value))}" style="width:180px">`;
+  }
+  return `<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;
+      border-top:1px solid #f1f3f7">
+    <div style="width:150px;flex:none;font-size:12px;color:#5b6274;padding-top:3px">
+      ${escapeHtml(s.label)}${help}</div>
+    <div style="flex:1">${ctl}</div></div>`;
+}
+
+function renderSettings(d){
+  settingsSchema = [];
+  (d.groups||[]).forEach(g=>g.items.forEach(s=>settingsSchema.push(s)));
+  $('settingsBox').innerHTML = (d.groups||[]).map(g=>`
+    <div style="margin-top:12px">
+      <div style="font-size:12px;font-weight:600;color:#1f2937;margin-bottom:4px">
+        ${escapeHtml(g.name)}</div>
+      ${g.items.map(settingsField).join('')}
+    </div>`).join('');
+  const n = settingsSchema.length;
+  $('settingsMsg').textContent = `共 ${n} 项设置`;
+}
+
+async function loadSettings(){
+  try{
+    renderSettings(await api('/api/settings'));
+  }catch(e){ toast('读取设置失败：'+e.message); }
+}
+
+function collectSettings(){
+  const patch = {};
+  document.querySelectorAll('#settingsBox [data-key]').forEach(el=>{
+    const key = el.dataset.key, type = el.dataset.type;
+    if(type === 'weekdays'){
+      if(!patch[key]) patch[key] = [];
+      if(el.checked) patch[key].push(el.dataset.day);
+    }else if(type === 'bool'){
+      patch[key] = el.checked;
+    }else if(type === 'number'){
+      if(el.value !== '') patch[key] = Number(el.value);
+    }else if(type === 'list'){
+      patch[key] = el.value.split('\n').map(x=>x.trim()).filter(Boolean);
+    }else{
+      patch[key] = el.value;
+    }
+  });
+  return patch;
+}
+
+async function saveSettings(patch){
+  try{
+    const r = await api('/api/settings', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(patch)});
+    renderSettings(r);
+    toast('设置已保存');
+    await loadAuto();
+    return true;
+  }catch(e){
+    // 400 时后端会返回逐项原因，转成可读提示
+    const msg = (e && e.message) || '';
+    toast('保存失败：' + msg);
+    return false;
+  }
+}
+
+async function resetSettings(){
+  try{
+    renderSettings(await api('/api/settings/reset', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({})}));
+    toast('已恢复默认值');
+    await loadAuto();
+  }catch(e){ toast('恢复失败：'+e.message); }
+}
+
+async function cleanupNow(){
+  try{
+    const r = await api('/api/cleanup', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    const f = (r.shots && r.shots.files) || 0;
+    const mb = ((r.shots && r.shots.bytes) || 0) / 1048576;
+    const d = (r.logs && r.logs.dropped) || 0;
+    toast(`清理完成：回收截图 ${f} 个（${mb.toFixed(2)} MB），清理日志 ${d} 条`);
+  }catch(e){ toast('清理失败：'+e.message); }
+}
+
+/* ---------- 自动运行 ---------- */
+async function loadAuto(){
+  try{
+    const a = await api('/api/auto');
+    const on = a.enabled ? '已启用' : '未启用';
+    const names = (a.targets||[]).map(t=>t.name).join('、') || '（还没保存）';
+    $('autoBox').innerHTML =
+      `<b>自动运行：${on}</b>　目标 ${a.targets.length} 个：${escapeHtml(names)}<br>`
+      + `触发时间 ${escapeHtml(a.start_at||'')}　补跑宽限 ${a.grace_minutes ?? '–'} 分钟　`
+      + `上次执行 ${a.last_run_day ? escapeHtml(a.last_run_day) : '（无）'}<br>`
+      + `当前判断：${escapeHtml(a.reason||'')}`
+      + (a.last_error ? `<br><span style="color:#b54708">上次错误：${escapeHtml(a.last_error)}</span>` : '');
+  }catch(e){ $('autoBox').textContent = '读取自动运行状态失败：' + e.message; }
+}
+
+async function saveAutoTargets(){
+  const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username}));
+  if(!targets.length) return toast('请先在上方勾选群/好友');
+  try{
+    const r = await api('/api/auto/targets', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({targets})});
+    toast(`已保存 ${r.saved} 个目标为自动任务`);
+    await loadAuto();
+  }catch(e){ toast('保存失败：'+e.message); }
+}
+
+async function autoRunNow(){
+  try{
+    await api('/api/auto/run-now', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast('已启动一轮自动任务，看下方运行日志');
+    startPolling();
+    await loadAuto();
+  }catch(e){ toast('启动失败：'+e.message); }
+}
+
+async function autoResetDay(){
+  try{
+    await api('/api/auto/reset-day', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast('已清除「今天已跑」标记');
+    await loadAuto();
+  }catch(e){ toast('操作失败：'+e.message); }
 }
 
 /* ---------- 生成计划 ---------- */
@@ -1120,6 +1311,18 @@ $('exportLeads').addEventListener('click', exportLeads);
 $('reloadReport').addEventListener('click', loadReport);
 $('leadFilter').addEventListener('change', loadLeads);
 
+/* 设置面板 */
+$('reloadSettings').addEventListener('click', loadSettings);
+$('saveSettings').addEventListener('click', ()=>saveSettings(collectSettings()));
+$('resetSettings').addEventListener('click', resetSettings);
+$('cleanupNow').addEventListener('click', cleanupNow);
+
+/* 自动运行 */
+$('reloadAuto').addEventListener('click', loadAuto);
+$('saveAutoTargets').addEventListener('click', saveAutoTargets);
+$('autoRunNow').addEventListener('click', autoRunNow);
+$('autoResetDay').addEventListener('click', autoResetDay);
+
 /* ---------- 启动 ---------- */
 async function loadPaths(){
   try{
@@ -1143,6 +1346,8 @@ async function loadPaths(){
     // 线索与周报是可选模块，失败不应影响主流程
     loadLeads().catch(()=>{});
     loadReport().catch(()=>{});
+    loadSettings().catch(()=>{});
+    loadAuto().catch(()=>{});
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));
   }
