@@ -42,6 +42,10 @@
       {
         "from": "frontend",
         "to": "frontend"
+      },
+      {
+        "from": "vendor/python",
+        "to": "python"
       }
     ],
     "win": {

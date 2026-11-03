@@ -315,7 +315,20 @@ app.setPath('logs',       <安装目录>/logs);
 周报给出的砍群建议可以一键落为「降频」，再逐个调整。
 计划生成时直接生效，并在预览里说明「谁因为什么被跳过」。
 
-### 4.10 执行与截图
+### 4.10 自带 Python（v1.5.0）
+
+安装包**已内置 Python 3.14.7**，目标电脑无需预装 Python 即可运行
+（`resources/python/python.exe`，启动时优先使用，不依赖 PATH）。
+
+- 内置环境只含运行所需依赖，已精简至约 163 MB
+  （去掉只在「朋友圈」用的 opencv 与视频转码用的 imageio_ffmpeg；
+   numpy 因 UIA 核心要用而保留）
+- `vendor/python` 体积大、不进 git；从仓库构建前先跑一次
+  **`准备内嵌Python.bat`**（等价于 `powershell -File tools/prepare-python.ps1`）
+  把它造出来，然后再 `打包.bat`
+- 若未准备，`打包.bat` 仍能打包，但会提示「安装包需要目标机装 Python」
+
+### 4.11 执行与截图
 
 - 点「开始发送」后按计划执行，实时显示进度与日志
 - **每次发送后自动截图**，存到 `shots/<日期>/r<轮次>_<时间>_<目标名>.png`

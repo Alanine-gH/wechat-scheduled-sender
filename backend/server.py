@@ -33,6 +33,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List
 from urllib.parse import parse_qs, urlparse
 
+# 兼容 embeddable / 隔离模式的 Python：
+# 内置的 python._pth 会接管 sys.path，**不会**自动把脚本所在目录加进去，
+# 于是下面 `import userdata` 这类同级模块就找不到了
+# （实测报 ModuleNotFoundError: No module named 'userdata'）。
+# 显式补一次，对普通 Python 无副作用（它本就已经在 sys.path 里）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 # 必须在导入 sender / contacts 之前完成路径重定向
 import userdata
 

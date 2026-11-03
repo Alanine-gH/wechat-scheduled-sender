@@ -57,6 +57,13 @@ REM cmd treat the rest of the line as a separate command ->
 REM "The system cannot find the path specified" (while still building fine).
 echo     Cache stays inside: "%~dp0cache\electron-builder"
 echo     Output goes to:     "%~dp0dist"
+if not exist "%~dp0vendor\python\python.exe" (
+    echo [WARN] vendor\python\python.exe was not found.
+    echo        Packaging will still work, but the installer will need
+    echo        Python 3.9+ installed on the target PC.
+    echo        Run: powershell -File tools\prepare-python.ps1
+    echo.
+)
 echo.
 
 if "%VER%"=="" goto :build_plain

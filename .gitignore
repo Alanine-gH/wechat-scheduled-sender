@@ -87,3 +87,4 @@ wechatauto_logs/
 # 生成脚本与素材留在本地，可随时用 宣传视频/工程/制作视频.py 重建。
 # 需要分享时：gh release upload <tag> 宣传视频/*.mp4
 宣传视频/
+vendor/
