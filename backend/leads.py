@@ -100,6 +100,8 @@ def add_items(items: List[Dict[str, Any]], data_dir: str,
             "note": "",
             "created": int(time.time()),
             "updated": int(time.time()),
+            # 是否已弹过桌面通知。只对高意向线索用，避免同一人反复弹窗
+            "notified": False,
         }
         added += 1
 
@@ -128,6 +130,36 @@ def list_leads(data_dir: str,
         x["status_cn"] = STATUS_CN.get(x.get("status") or "", x.get("status") or "")
         x["intent_cn"] = INTENT_CN.get(x.get("intent") or "", x.get("intent") or "")
     return out[:limit] if limit > 0 else out
+
+
+def pending_notify(data_dir: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """还没弹过通知的「高意向」线索（intent=need）。
+
+    为什么只通知高意向：方案里「仅领资料」是低意向，天天弹窗只会让人关掉通知；
+    「有具体客户」才是当天要转组长的，值得打断一下。
+    """
+    d = load(data_dir)
+    out = [x for x in d["leads"].values()
+           if x.get("intent") == "need" and not x.get("notified")]
+    out.sort(key=lambda x: x.get("at") or 0)
+    for x in out:
+        x["at_text"] = time.strftime("%m-%d %H:%M",
+                                     time.localtime(x.get("at") or 0))
+    return out[:limit] if limit > 0 else out
+
+
+def mark_notified(data_dir: str, lead_ids: List[str]) -> int:
+    """标记为已通知，避免同一线索反复弹窗。"""
+    d = load(data_dir)
+    n = 0
+    for lid in lead_ids or []:
+        rec = d["leads"].get(lid)
+        if rec and not rec.get("notified"):
+            rec["notified"] = True
+            n += 1
+    if n:
+        save(data_dir, d)
+    return n
 
 
 def get_lead(data_dir: str, lead_id: str) -> Optional[Dict[str, Any]]:

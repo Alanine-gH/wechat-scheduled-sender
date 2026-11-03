@@ -384,6 +384,7 @@
         <button class="btn" id="reloadLeads" type="button">刷新线索</button>
         <button class="btn" id="exportLeads" type="button">导出 CSV</button>
         <button class="btn" id="reloadReport" type="button">刷新周报</button>
+        <button class="btn" id="testNotify" type="button">测试通知</button>
         <select id="leadFilter" style="width:150px">
           <option value="">全部线索</option>
           <option value="new">待筛选</option>
@@ -1321,6 +1322,73 @@ async function applyCuts(){
   }catch(e){ toast('操作失败：'+e.message); }
 }
 
+/* ---------- 新线索桌面通知 ---------- */
+let notifyTimer = null;
+
+function canNotify(){
+  return (typeof Notification !== 'undefined');
+}
+
+function showLeadNotification(items){
+  if(!canNotify() || !items || !items.length) return;
+  let title, body;
+  if(items.length === 1){
+    const it = items[0];
+    title = `高意向线索：${it.name || '有人'} 主动私聊`;
+    body = (it.text || '').slice(0, 90)
+         + (it.keywords && it.keywords.length ? `\n命中：${it.keywords.join('、')}` : '');
+  }else{
+    title = `${items.length} 条新高意向线索`;
+    body = items.slice(0, 3).map(x=>`${x.name||'?'}：${(x.text||'').slice(0,24)}`).join('\n');
+  }
+  try{
+    const n = new Notification(title, { body, tag: 'wcs-lead', renotify: true });
+    n.onclick = () => {
+      try { window.focus(); } catch(_) {}
+      // 点通知直接跳到线索面板
+      const box = $('leadsBox');
+      if(box) box.scrollIntoView({behavior:'smooth', block:'center'});
+    };
+  }catch(e){
+    console.warn('[wcs] 通知失败:', e && e.message);
+  }
+}
+
+async function checkLeadNotify(){
+  try{
+    const d = await api('/api/notify/pending');
+    const interval = Math.max(15, d.interval || 60) * 1000;
+    if(d.enabled && (d.items||[]).length){
+      // 系统通知可能被「专注助手/勿扰模式」拦掉，所以界面里也提示一下
+      showLeadNotification(d.items);
+      toast(`新线索 ${d.items.length} 条`);
+      await api('/api/notify/ack', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ids: d.items.map(x=>x.id)})});
+      loadLeads().catch(()=>{});
+    }
+    scheduleNotify(interval);
+  }catch(e){
+    scheduleNotify(60000);   // 出错就 1 分钟后再试，不要在这里 toast 打扰
+  }
+}
+
+function scheduleNotify(ms){
+  if(notifyTimer) clearTimeout(notifyTimer);
+  notifyTimer = setTimeout(checkLeadNotify, ms || 60000);
+}
+
+function testNotification(){
+  if(!canNotify()){
+    toast('当前环境不支持桌面通知');
+    return;
+  }
+  try{
+    new Notification('测试通知', { body: '如果你看到这条，说明通知是通的。' });
+    toast('已发送测试通知（若没看到，检查 Windows 专注助手/勿扰模式）');
+  }catch(e){ toast('通知失败：' + e.message); }
+}
+
 /* ---------- 生成计划 ---------- */
 async function genPlan(){
   const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
@@ -1587,6 +1655,7 @@ $('reloadLeads').addEventListener('click', loadLeads);
 $('exportLeads').addEventListener('click', exportLeads);
 $('reloadReport').addEventListener('click', loadReport);
 $('leadFilter').addEventListener('change', loadLeads);
+$('testNotify').addEventListener('click', testNotification);
 
 /* 设置面板 */
 $('reloadSettings').addEventListener('click', loadSettings);
@@ -1644,6 +1713,8 @@ async function loadPaths(){
     loadFails().catch(()=>{});
     loadBackups().catch(()=>{});
     loadTargets().catch(()=>{});
+    // 新线索通知轮询（间隔由后端设置决定，改设置后下一轮自动生效）
+    scheduleNotify(8000);
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));
   }

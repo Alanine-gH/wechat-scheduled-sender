@@ -770,6 +770,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True,
                                    "backups": backup_mod.list_backups(DATA_DIR),
                                    "files": list(backup_mod.BACKUP_FILES)})
+            if p == "/api/notify/pending":
+                # 待弹通知的高意向线索（前端轮询这个）
+                st = settings_mod.load(DATA_DIR)
+                enabled = bool(st.get("lead_notify"))
+                items = leads_mod.pending_notify(DATA_DIR, 5) if enabled else []
+                return self._json({
+                    "ok": True, "enabled": enabled,
+                    "interval": int(st.get("lead_notify_seconds") or 60),
+                    "items": items, "count": len(items),
+                })
             if p == "/api/targets":
                 # 目标投放状态（暂停/降频），以及报告给出的砍群建议
                 return self._json({
@@ -1069,6 +1079,15 @@ class Handler(BaseHTTPRequestHandler):
                 n = targets_mod.apply_cut_candidates(DATA_DIR, cands, mode)
                 return self._json({"ok": True, "applied": n,
                                    "targets": targets_mod.describe(DATA_DIR)})
+
+            if p == "/api/notify/ack":
+                # 标记已通知，避免同一线索反复弹窗
+                body = body or {}
+                ids = body.get("ids") or []
+                if isinstance(ids, str):
+                    ids = [ids]
+                n = leads_mod.mark_notified(DATA_DIR, ids)
+                return self._json({"ok": True, "acked": n})
 
             if p == "/api/failures/retry":
                 # 一键补发

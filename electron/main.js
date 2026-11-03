@@ -358,6 +358,11 @@ async function boot() {
   app.quit();
 }
 
+// Windows 上弹系统通知必须先设 AppUserModelId，否则 new Notification() 会
+// **静默失败**（不报错、也不弹窗），非常难查。取值与 package.json 的
+// build.appId 保持一致。
+app.setAppUserModelId('com.alanine.wechat.sender');
+
 app.whenReady().then(() => {
   registerIpc();
   boot();

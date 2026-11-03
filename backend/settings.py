@@ -74,6 +74,9 @@ DEFAULTS: Dict[str, Any] = {
                       "贸易", "代账", "事务所", "分润", "合作"],
     "keywords_hook": ["资料", "清单", "模板", "表格", "pdf", "发我", "要一份",
                       "来一份", "怎么领", "领取"],
+    # 收到「高意向」私聊时弹桌面通知（低意向不弹，否则会被关掉通知）
+    "lead_notify": True,
+    "lead_notify_seconds": 60,           # 检查新线索的间隔
 
     # 清理
     "log_keep_days": 30,
@@ -151,6 +154,10 @@ SCHEMA: List[Dict[str, Any]] = [
      "help": "命中即判为「有具体需求」，当天该转组长"},
     {"key": "keywords_hook", "group": "接收", "label": "低意向关键词", "type": "list",
      "help": "命中即判为「仅领资料」"},
+    {"key": "lead_notify", "group": "接收", "label": "高意向线索弹桌面通知",
+     "type": "bool", "help": "有人主动私聊且提到客户/业务时提醒你；仅领资料不弹"},
+    {"key": "lead_notify_seconds", "group": "接收", "label": "通知检查间隔（秒）",
+     "type": "number", "min": 15, "max": 3600},
 
     # ── 清理 ──
     {"key": "log_keep_days", "group": "清理", "label": "日志保留天数", "type": "number",
