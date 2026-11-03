@@ -27,6 +27,7 @@ data/media/
 data/recall/
 # 接收到的私聊线索、关键词命中记录（含真实昵称与会话内容）
 data/leads.json
+data/leads.csv
 data/inbox_state.json
 data/schedule_state.json
 

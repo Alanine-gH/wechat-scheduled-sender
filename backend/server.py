@@ -41,6 +41,7 @@ userdata.configure(os.environ.get("WCS_DATA_ROOT"))
 import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
 import inbox as inbox_mod  # noqa: E402
+import leads as leads_mod  # noqa: E402
 import media as media_mod  # noqa: E402
 import planner  # noqa: E402
 import scheduler  # noqa: E402
@@ -397,6 +398,19 @@ class Handler(BaseHTTPRequestHandler):
                     "detail": {v.get("name") or k: v.get("cursor")
                                for k, v in chats.items()},
                 })
+            if p == "/api/leads":
+                # 线索表：列表 + 统计（可按状态/意图过滤）
+                status = (q.get("status") or [None])[0]
+                intent = (q.get("intent") or [None])[0]
+                limit = int((q.get("limit") or ["200"])[0] or 200)
+                return self._json({
+                    "ok": True,
+                    "leads": leads_mod.list_leads(DATA_DIR, status=status,
+                                                  intent=intent, limit=limit),
+                    "stats": leads_mod.stats(DATA_DIR),
+                    "statuses": [{"key": k, "cn": leads_mod.STATUS_CN[k]}
+                                 for k in leads_mod.STATUSES],
+                })
             if p.startswith("/shots/"):
                 rel = os.path.normpath(p[len("/shots/"):]).replace("..", "")
                 return self._file(os.path.join(SHOT_DIR, rel), "image/png")
@@ -566,21 +580,39 @@ class Handler(BaseHTTPRequestHandler):
                 if r.get("error"):
                     return self._json({"ok": False, "error": r["error"]}, 500)
                 items = r.get("items") or []
-                # 命中的线索追加进线索表（leads 模块，任务 5）
-                # 惰性导入：线索模块缺失时接收功能本身仍可用
+                # 命中的线索登记进线索表
                 try:
-                    import leads as leads_mod
                     r["added"] = leads_mod.add_items(items, DATA_DIR)
-                except ImportError:
-                    r["added"] = 0
                 except Exception as exc:
                     r["leads_error"] = str(exc)
+                    r["added"] = 0
                 r.pop("state", None)
                 return self._json({"ok": True, **r})
 
             if p == "/api/inbox/reset":
                 n = inbox_mod.reset_cursors(DATA_DIR)
                 return self._json({"ok": True, "cleared": n})
+
+            if p == "/api/leads/update":
+                body = body or {}
+                lid = str(body.get("id") or "")
+                if not lid:
+                    return self._json({"ok": False, "error": "缺少 id"}, 400)
+                patch = {k: body[k] for k in ("status", "note", "source_group", "name")
+                         if k in body}
+                if not leads_mod.update_lead(DATA_DIR, lid, **patch):
+                    return self._json({"ok": False,
+                                       "error": "线索不存在或状态非法"}, 400)
+                return self._json({"ok": True,
+                                   "lead": leads_mod.get_lead(DATA_DIR, lid)})
+
+            if p == "/api/leads/export":
+                body = body or {}
+                # 默认导到安装目录下的 data/，用户可指定其它路径
+                out = body.get("path") or os.path.join(DATA_DIR, "leads.csv")
+                r = leads_mod.export_csv(DATA_DIR, out,
+                                         status=body.get("status"))
+                return self._json(r, 200 if r.get("ok") else 500)
 
             if p == "/api/start":
                 if RT.running:
