@@ -428,6 +428,16 @@
         <button class="btn" id="reloadAuto" type="button">刷新状态</button>
       </div>
       <div class="note" id="autoBox" style="display:block">–</div>
+
+      <h3 style="margin:18px 0 6px;font-size:13px">备份与恢复</h3>
+      <p class="hint" style="margin-top:0">把配置、文案、线索打成一个 zip。
+        恢复前会<b>自动快照当前状态</b>，恢复错了可以退回。</p>
+      <div class="row" style="margin-bottom:10px">
+        <button class="btn primary" id="backupNow" type="button">立即备份</button>
+        <button class="btn" id="reloadBackups" type="button">刷新备份列表</button>
+        <span class="pill" id="backupMsg">–</span>
+      </div>
+      <div class="preview" id="backupBox" style="display:none;margin-top:10px"></div>
     </section>
 
     <section class="card rise full" style="animation-delay:.28s">
@@ -1137,6 +1147,60 @@ async function clearFails(){
   }catch(e){ toast('清理失败：'+e.message); }
 }
 
+/* ---------- 备份与恢复 ---------- */
+async function loadBackups(){
+  try{
+    const d = await api('/api/backup');
+    const bs = d.backups || [];
+    $('backupMsg').textContent = `${bs.length} 个备份`;
+    const box = $('backupBox');
+    if(!bs.length){
+      box.style.display = 'block';
+      box.innerHTML = '<div class="hlp" style="padding:12px;color:#9aa1b2">'
+        + '还没有备份。点「立即备份」生成第一个。</div>';
+      return;
+    }
+    const rows = bs.map(b=>`<tr>
+      <td style="white-space:nowrap">${escapeHtml(b.at_text||'')}</td>
+      <td class="txt">${escapeHtml(b.name)}</td>
+      <td style="white-space:nowrap">${escapeHtml(b.size_text||'')}</td>
+      <td><button class="btn" data-path="${escapeHtml(b.path)}"
+        onclick="restoreBackup(this.dataset.path)">恢复</button></td>
+    </tr>`).join('');
+    box.style.display = 'block';
+    box.innerHTML = `<table><thead><tr><th>时间</th><th>文件</th><th>大小</th>
+      <th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }catch(e){ toast('读取备份列表：'+e.message); }
+}
+
+async function backupNow(){
+  try{
+    const r = await api('/api/backup/export', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    if(r.ok) toast(`已备份 ${r.count} 个文件（${r.size_text}）`);
+    else toast('备份失败：'+(r.error||''));
+    await loadBackups();
+  }catch(e){ toast('备份失败：'+e.message); }
+}
+
+async function restoreBackup(path){
+  if(!confirm('确定要用这个备份覆盖当前配置、文案和线索吗？\n\n恢复前会自动快照当前状态，可以退回。')) return;
+  try{
+    const r = await api('/api/backup/import', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path})});
+    if(r.ok){
+      toast(`已恢复 ${r.count} 个文件${r.snapshot ? '，原状态已快照' : ''}`);
+      await loadBackups();
+      await loadSettings();
+      await loadCampaign();
+      await loadLeads();
+    }else{
+      toast('恢复失败：'+(r.error||''));
+    }
+  }catch(e){ toast('恢复失败：'+e.message); }
+}
+
 /* ---------- 生成计划 ---------- */
 async function genPlan(){
   const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
@@ -1416,6 +1480,10 @@ $('reloadFails').addEventListener('click', loadFails);
 $('retryFails').addEventListener('click', retryFails);
 $('clearFails').addEventListener('click', clearFails);
 
+/* 备份与恢复 */
+$('backupNow').addEventListener('click', backupNow);
+$('reloadBackups').addEventListener('click', loadBackups);
+
 /* 自动运行 */
 $('reloadAuto').addEventListener('click', loadAuto);
 $('saveAutoTargets').addEventListener('click', saveAutoTargets);
@@ -1448,6 +1516,7 @@ async function loadPaths(){
     loadSettings().catch(()=>{});
     loadAuto().catch(()=>{});
     loadFails().catch(()=>{});
+    loadBackups().catch(()=>{});
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));
   }

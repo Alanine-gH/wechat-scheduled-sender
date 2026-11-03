@@ -39,6 +39,7 @@ import userdata
 userdata.configure(os.environ.get("WCS_DATA_ROOT"))
 
 import autorun as autorun_mod  # noqa: E402
+import backup as backup_mod  # noqa: E402
 import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
 import doctor as doctor_mod  # noqa: E402
@@ -754,6 +755,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True,
                                    "items": failures_mod.pending(DATA_DIR),
                                    "stats": failures_mod.stats(DATA_DIR)})
+            if p == "/api/backup":
+                # 已有备份列表
+                return self._json({"ok": True,
+                                   "backups": backup_mod.list_backups(DATA_DIR),
+                                   "files": list(backup_mod.BACKUP_FILES)})
             if p == "/api/report":
                 # 周报：投放量 + 线索量 + 6 项 KPI + 砍群建议
                 return self._json({"ok": True, **report_mod.weekly_report(DATA_DIR)})
@@ -994,6 +1000,22 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/cleanup":
                 # 手动清理一次（界面上的「立即清理」按钮）
                 return self._json({"ok": True, **_housekeep("手动")})
+
+            if p == "/api/backup/export":
+                # 立即备份一次，返回包路径与清单
+                return self._json(backup_mod.export(DATA_DIR))
+
+            if p == "/api/backup/import":
+                # 从备份恢复（导入前会自动快照当前状态）
+                body = body or {}
+                path = str(body.get("path") or "")
+                if not path:
+                    return self._json({"ok": False, "error": "缺少备份文件路径"}, 400)
+                if RT.running:
+                    return self._json({"ok": False,
+                                       "error": "任务执行中，请先停止再恢复"}, 409)
+                r = backup_mod.import_(DATA_DIR, path)
+                return self._json(r, 200 if r.get("ok") else 400)
 
             if p == "/api/failures/retry":
                 # 一键补发

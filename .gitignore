@@ -29,6 +29,7 @@ data/recall/
 data/leads.json
 data/leads.csv
 data/failures.json
+data/backup/
 data/inbox_state.json
 data/schedule_state.json
 data/auto_task.json
