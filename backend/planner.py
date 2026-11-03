@@ -14,6 +14,9 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import campaign as _campaign
+import scheduler as _scheduler
+
 DEFAULT_ROUNDS = 1          # 轮数：默认 1 轮
 DEFAULT_PER_ROUND = 0       # 每轮条数：0 = 跟随已选目标数（每个目标恰好 1 条）
 DEFAULT_INTERVAL_MIN = 3.5  # 轮间隔下限（分钟）
@@ -207,4 +210,90 @@ def build_plan(
         "estimated_minutes": round(total_seconds / 60.0, 1),
         "round_plans": [pr.to_dict() for pr in plan_rounds],
         "assignments": assignments,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 内容编排计划（绝对时间 + 双波次剧本）
+# ---------------------------------------------------------------------------
+def build_campaign_plan(targets: List[str],
+                        campaign_obj,
+                        day: Optional[_dt.date] = None,
+                        start_at: str = _scheduler.DEFAULT_START_AT,
+                        interval_min: float = DEFAULT_INTERVAL_MIN,
+                        interval_max: float = DEFAULT_INTERVAL_MAX,
+                        hook_delay_min: float = _scheduler.DEFAULT_HOOK_DELAY_MIN,
+                        hook_days: Optional[List[str]] = None,
+                        media_by_target: Optional[Dict[str, List[str]]] = None,
+                        weekly_cap: int = _scheduler.DEFAULT_WEEKLY_CAP,
+                        data_dir: str = "",
+                        now: Optional[_dt.datetime] = None) -> Dict[str, Any]:
+    """生成「按星期内容 + 固定时间 + 双波次」的投放计划。
+
+    与 `build_plan` 的区别：这里产出的是**绝对时间事件表**
+    （主文案 + 各自的钩子），而不是「两条之间的相对等待」。
+    方案要求固定晚 8 点发、30 分钟后补钩子，相对等待做不到这一点。
+
+    ``weekly_cap`` > 0 时按「每群每周上限」过滤目标（状态记在 data_dir）。
+    """
+    day = day or (now or _dt.datetime.now()).date()
+    media_by_target = media_by_target or {}
+
+    # 频次过滤：达到本周上限的群本轮跳过
+    skipped: List[str] = []
+    if weekly_cap and weekly_cap > 0 and data_dir:
+        allowed = _scheduler.filter_by_cap(targets, data_dir, weekly_cap, day)
+        skipped = [t for t in targets if t not in allowed]
+        targets = allowed
+
+    events = _scheduler.build_events(
+        targets, campaign_obj, day=day, start_at=start_at,
+        interval_min=interval_min, interval_max=interval_max,
+        hook_delay_min=hook_delay_min, hook_days=hook_days,
+        media_by_target=media_by_target,
+        seed=day.isoformat(), now=now,
+    )
+
+    # datetime 不能直接 JSON 序列化，统一转成 ISO 字符串
+    out_events: List[Dict[str, Any]] = []
+    for e in events:
+        out_events.append({
+            "at": e["at"].isoformat(timespec="seconds"),
+            "target": e["target"],
+            "kind": e["kind"],
+            "text": e["text"],
+            "media_path": e.get("media_path") or "",
+            "media_first": True,
+        })
+
+    main_count = sum(1 for e in out_events if e["kind"] == "main")
+    hook_count = sum(1 for e in out_events if e["kind"] == "hook")
+    span = 0.0
+    if out_events:
+        first = _dt.datetime.fromisoformat(out_events[0]["at"])
+        last = _dt.datetime.fromisoformat(out_events[-1]["at"])
+        span = (last - first).total_seconds()
+
+    camp = campaign_obj
+    return {
+        "mode": "campaign",
+        "seed_date": day.isoformat(),
+        "weekday": _campaign.weekday_key(day),
+        "weekday_cn": _campaign.weekday_cn(_campaign.weekday_key(day)),
+        "start_at": start_at,
+        "hook_delay_minutes": hook_delay_min,
+        "hook_today": bool(hook_count),
+        "targets": targets,
+        "target_count": len(targets),
+        "skipped_by_cap": skipped,
+        "weekly_cap": weekly_cap,
+        "total_messages": len(out_events),
+        "main_count": main_count,
+        "hook_count": hook_count,
+        "span_minutes": round(span / 60.0, 1),
+        "estimated_minutes": round(span / 60.0, 1),
+        "campaign": camp.to_dict() if camp is not None else {},
+        "main_preview": camp.compose(day) if camp is not None else "",
+        "hook_preview": (camp.hook(day) or "") if camp is not None else "",
+        "events": out_events,
     }

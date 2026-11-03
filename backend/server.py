@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import sys
@@ -37,9 +38,11 @@ import userdata
 
 userdata.configure(os.environ.get("WCS_DATA_ROOT"))
 
+import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
 import media as media_mod  # noqa: E402
 import planner  # noqa: E402
+import scheduler  # noqa: E402
 from sender import SendEngine, find_wechat_window  # noqa: E402
 
 ROOT = userdata.data_root()
@@ -51,6 +54,7 @@ FRONTEND_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend"
 )
 MESSAGES_FILE = os.path.join(DATA_DIR, "messages.txt")
+CAMPAIGN_FILE = os.path.join(DATA_DIR, "campaign.txt")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 
 AUTH_TOKEN = ""   # 由 main() 注入
@@ -114,6 +118,89 @@ def _safe(name: str) -> str:
     return out[:40] or "target"
 
 
+def _send_one(engine, display: str, wxid, text: str, shot_dir: str,
+              tag: str, pair: dict, kind_label: str = "") -> bool:
+    """发一条并记账。返回 True 表示应该继续，False 表示被取消（应终止）。"""
+    shot_path = os.path.join(
+        shot_dir, time.strftime("%Y%m%d"),
+        "r%02d_%s_%s.png" % (pair.get("index") or 1, time.strftime("%H%M%S"),
+                             _safe(display)),
+    )
+    res = engine.send_to(wxid or display, text, display=display,
+                         username=wxid, shot_path=shot_path,
+                         media_path=pair.get("media_path") or None,
+                         media_first=bool(pair.get("media_first", True)))
+    if res.get("cancelled"):
+        RT.log("WARN", "已停止：中断于 %s" % display)
+        return False
+    if res.get("ok"):
+        RT.progress["sent"] += 1
+        t = "已校验" if res.get("verified") or res.get("media_verified") else "未回读"
+        extra = ""
+        mp = pair.get("media_path")
+        if mp:
+            extra = " [素材 %s]" % os.path.basename(mp)
+        head = ("%s " % kind_label) if kind_label else ""
+        RT.log("OK", "%s已发送 -> %s [%s]%s | %s"
+               % (head, display, t, extra,
+                  (text or "(仅素材)")[:24].replace("\n", " ")))
+    else:
+        RT.progress["failed"] += 1
+        RT.log("ERROR", "发送失败 -> %s : %s" % (display, res.get("error")))
+    return True
+
+
+def _run_events(engine, plan: dict) -> None:
+    """按「绝对时间事件表」执行（内容编排模式）。
+
+    事件已按时间排好序，逐条等到点再发。这样群 1 的钩子可以插在
+    群 5 的主文案之前 —— 而不是把所有钩子堆到全部主文案之后。
+    """
+    events = plan.get("events") or []
+    RT.progress.update({"total": len(events), "sent": 0, "failed": 0,
+                        "total_rounds": 1, "round": 1})
+    RT.log("INFO", "===== 内容编排模式：%d 个事件，起始 %s ====="
+           % (len(events), plan.get("start_at")))
+
+    for i, ev in enumerate(events):
+        if not RT.running:
+            RT.log("WARN", "收到停止指令，终止执行")
+            break
+        # 等到事件时间点；等待期间可被停止打断
+        try:
+            at = datetime.fromisoformat(ev["at"])
+        except Exception:
+            at = None
+        if at is not None:
+            while RT.running:
+                gap = (at - datetime.now()).total_seconds()
+                if gap <= 0:
+                    break
+                if gap > 5:
+                    RT.log("INFO", "等待 %.0f 秒后发送 %s -> %s"
+                           % (gap, ev.get("kind"), ev.get("target")))
+                time.sleep(min(2.0, max(0.2, gap)))
+        if not RT.running:
+            break
+
+        pair = {
+            "index": 1,
+            "target": ev.get("target"),
+            "media_path": ev.get("media_path") or "",
+            "media_first": True,
+        }
+        wxid = (plan.get("username_of") or {}).get(ev.get("target") or "")
+        label = {"main": "[主文案]", "hook": "[钩子]"}.get(ev.get("kind") or "", "")
+        if not _send_one(engine, ev.get("target") or "", wxid,
+                         ev.get("text") or "", SHOT_DIR, label, pair):
+            break
+        # 计时用的进度
+        RT.progress["round"] = 1
+        if i + 1 >= len(events):
+            break
+        time.sleep(1.2)
+
+
 def _run_plan(plan: dict) -> None:
     RT.running = True
     RT.started_at = time.time()
@@ -124,6 +211,23 @@ def _run_plan(plan: dict) -> None:
         RT.log("INFO", "已连接微信窗口 hwnd=%s" % engine.hwnd)
     except Exception as exc:
         RT.log("ERROR", "初始化发送引擎失败: %s" % exc)
+        RT.running = False
+        return
+
+    # 内容编排模式：按绝对时间事件表跑
+    if plan.get("mode") == "campaign" and plan.get("events"):
+        try:
+            _run_events(engine, plan)
+        except Exception as exc:
+            RT.log("ERROR", "执行异常: %s" % exc)
+        RT.log("INFO", "任务结束。成功 %d / 失败 %d" %
+               (RT.progress["sent"], RT.progress["failed"]))
+        # 记账供每周上限统计
+        try:
+            for t in (plan.get("targets") or []):
+                scheduler.record_sent(t, DATA_DIR)
+        except Exception:
+            pass
         RT.running = False
         return
 
@@ -158,31 +262,9 @@ def _run_plan(plan: dict) -> None:
             display = pair.get("target")
             wxid = pair.get("username")
             text = pair.get("text")
-            shot_path = os.path.join(
-                SHOT_DIR, time.strftime("%Y%m%d"),
-                "r%02d_%s_%s.png" % (rnd["index"], time.strftime("%H%M%S"), _safe(display)),
-            )
-            res = engine.send_to(wxid or display, text, display=display,
-                                 username=wxid, shot_path=shot_path,
-                                 media_path=pair.get("media_path") or None,
-                                 media_first=bool(pair.get("media_first", True)))
-            if res.get("cancelled"):
-                # 被停止指令中断，不算失败，也不再继续
-                RT.log("WARN", "已停止：中断于 %s" % display)
+            pair = dict(pair, index=rnd["index"])
+            if not _send_one(engine, display, wxid, text, SHOT_DIR, "", pair):
                 break
-            if res.get("ok"):
-                RT.progress["sent"] += 1
-                tag = "已校验" if res.get("verified") else ("未回读" if wxid else "无wxid")
-                extra = ""
-                mp = pair.get("media_path")
-                if mp:
-                    extra = " [素材 %s]" % os.path.basename(mp)
-                RT.log("OK", "已发送 -> %s [%s]%s | %s"
-                       % (display, tag, extra,
-                          (text or "(仅素材)")[:24].replace("\n", " ")))
-            else:
-                RT.progress["failed"] += 1
-                RT.log("ERROR", "发送失败 -> %s : %s" % (display, res.get("error")))
             time.sleep(1.2)
 
     RT.log("INFO", "任务结束。成功 %d / 失败 %d" %
@@ -330,6 +412,32 @@ class Handler(BaseHTTPRequestHandler):
                         media_by_target = {
                             k: [x.path for x in v] for k, v in assign.items()
                         }
+                # ── 内容编排模式：绝对时间 + 双波次剧本 ──
+                # body.campaign = true 时走这条；否则仍走原来的「轮次 + 相对间隔」
+                if body.get("campaign"):
+                    camp_path = body.get("campaign_file") or CAMPAIGN_FILE
+                    camp = campaign_mod.load_campaign(camp_path)
+                    plan = planner.build_campaign_plan(
+                        targets=targets,
+                        campaign_obj=camp,
+                        start_at=body.get("start_at") or scheduler.DEFAULT_START_AT,
+                        interval_min=float(body.get("interval_min")
+                                           or planner.DEFAULT_INTERVAL_MIN),
+                        interval_max=float(body.get("interval_max")
+                                           or planner.DEFAULT_INTERVAL_MAX),
+                        hook_delay_min=float(body.get("hook_delay_min")
+                                             or scheduler.DEFAULT_HOOK_DELAY_MIN),
+                        hook_days=body.get("hook_days"),
+                        media_by_target=media_by_target,
+                        weekly_cap=int(body.get("weekly_cap")
+                                       or scheduler.DEFAULT_WEEKLY_CAP),
+                        data_dir=DATA_DIR,
+                    )
+                    plan["media"] = media_mod.describe(media_items) if media_items else None
+                    plan["campaign_file"] = camp_path
+                    RT.plan = plan
+                    return self._json({"ok": True, "plan": plan})
+
                 plan = planner.build_plan(
                     messages=msgs, targets=targets,
                     rounds=int(body.get("rounds") or planner.DEFAULT_ROUNDS),
@@ -349,11 +457,20 @@ class Handler(BaseHTTPRequestHandler):
                 items = media_mod.collect(spec)
                 return self._json({"ok": True, "media": media_mod.describe(items)})
 
+            if p == "/api/campaign":
+                # 内容编排预览：各天引导语、正文、钩子、每周频次
+                detail = campaign_mod.load_campaign_detail(CAMPAIGN_FILE)
+                detail["weekly_cap"] = int(scheduler.DEFAULT_WEEKLY_CAP)
+                detail["hook_days"] = detail.get("campaign", {}).get("hook_days")
+                detail["start_at"] = scheduler.DEFAULT_START_AT
+                detail["hook_delay_minutes"] = scheduler.DEFAULT_HOOK_DELAY_MIN
+                return self._json({"ok": True, **detail})
+
             if p == "/api/start":
                 if RT.running:
                     return self._json({"ok": False, "error": "任务已在运行中"}, 409)
                 plan = body.get("plan") or RT.plan
-                if not plan or not plan.get("assignments"):
+                if not plan or not (plan.get("assignments") or plan.get("events")):
                     return self._json({"ok": False, "error": "计划为空"}, 400)
                 if not find_wechat_window():
                     return self._json({"ok": False, "error": "未找到微信窗口，请先登录微信"}, 400)
