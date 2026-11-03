@@ -42,6 +42,7 @@ import autorun as autorun_mod  # noqa: E402
 import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
 import doctor as doctor_mod  # noqa: E402
+import failures as failures_mod  # noqa: E402
 import guard as guard_mod  # noqa: E402
 import housekeeping as house_mod  # noqa: E402
 import inbox as inbox_mod  # noqa: E402
@@ -222,11 +223,24 @@ def _send_one(engine, display: str, wxid, text: str, shot_dir: str,
         RT.log("OK", "%s已发送 -> %s [%s]%s | %s"
                % (head, display, t, extra,
                   (text or "(仅素材)")[:24].replace("\n", " ")))
+        # 发成功就按内容销账：这条以前失败过的话，待办自动消失
+        try:
+            failures_mod.resolve(DATA_DIR, display, kind, text,
+                                  pair.get("media_path") or "")
+        except Exception:
+            pass
         return "ok"
 
     RT.progress["failed"] += 1
     RT.log("ERROR", "发送失败（已试 %d 次）-> %s : %s"
            % (attempts, display, res.get("error")))
+    # 落盘登记，避免「程序一关就不知道哪些没发出去」
+    try:
+        failures_mod.add(DATA_DIR, display, kind, text,
+                         media_path=pair.get("media_path") or "",
+                         username=wxid or "", error=res.get("error") or "")
+    except Exception:
+        pass
     return "fail"
 
 
@@ -430,6 +444,46 @@ class InboxPoller:
             "last_added": self.last_added,
             "last_error": self.last_error,
         }
+
+
+def _retry_run() -> bool:
+    """补发：把失败的待办当成一份计划跑一遍。
+
+    复用内容编排那套事件执行器 —— 补发本质上就是「按时间表发一批消息」，
+    没必要另写一条发送路径（两条路径迟早会跑偏）。
+    发成功的条目会在 _send_one 里自动销账，仍失败的继续留在待办。
+    """
+    if RT.running:
+        return False
+    events = failures_mod.build_plan_items(DATA_DIR)
+    if not events:
+        RT.log("INFO", "没有待补发的失败记录")
+        return False
+    if not find_wechat_window():
+        RT.log("WARN", "补发：未找到微信窗口（可能未登录）")
+        return False
+
+    pend = failures_mod.pending(DATA_DIR)
+    by_name = {x.get("target"): x.get("username") or "" for x in pend}
+    plan = {
+        "mode": "campaign",
+        "events": events,
+        "targets": sorted({e["target"] for e in events}),
+        "target_count": len({e["target"] for e in events}),
+        "total_messages": len(events),
+        "main_count": sum(1 for e in events if e["kind"] == "main"),
+        "hook_count": sum(1 for e in events if e["kind"] == "hook"),
+        "username_of": by_name,
+        "retry": True,
+        "start_at": "补发",
+    }
+    RT.logs = []
+    RT.plan = plan
+    RT.log("INFO", "开始补发 %d 条失败记录" % len(events))
+    th = threading.Thread(target=_run_plan, args=(plan,), daemon=True)
+    RT.thread = th
+    th.start()
+    return True
 
 
 def _auto_run(task: dict) -> bool:
@@ -695,6 +749,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, **doctor_mod.run(
                     DATA_DIR, SHOT_DIR, acc,
                     int(sc.get("shot_keep_days") or 0))})
+            if p == "/api/failures":
+                # 查看待补发的失败记录（GET 读接口，必须放在 do_GET）
+                return self._json({"ok": True,
+                                   "items": failures_mod.pending(DATA_DIR),
+                                   "stats": failures_mod.stats(DATA_DIR)})
             if p == "/api/report":
                 # 周报：投放量 + 线索量 + 6 项 KPI + 砍群建议
                 return self._json({"ok": True, **report_mod.weekly_report(DATA_DIR)})
@@ -935,6 +994,24 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/cleanup":
                 # 手动清理一次（界面上的「立即清理」按钮）
                 return self._json({"ok": True, **_housekeep("手动")})
+
+            if p == "/api/failures/retry":
+                # 一键补发
+                if RT.running:
+                    return self._json({"ok": False, "error": "已有任务在执行"}, 409)
+                fired = _retry_run()
+                if not fired:
+                    return self._json({"ok": False,
+                                       "error": "没有待补发的记录，或未找到微信窗口"}, 400)
+                return self._json({"ok": True, "started": True})
+
+            if p == "/api/failures/clear":
+                # 清理失败记录（默认只删已解决的）
+                body = body or {}
+                n = failures_mod.clear(DATA_DIR,
+                                       only_resolved=bool(body.get("only_resolved", True)))
+                return self._json({"ok": True, "cleared": n,
+                                   "stats": failures_mod.stats(DATA_DIR)})
 
             if p == "/api/media":
                 # 预览素材：只收集不发送，让用户确认选对了

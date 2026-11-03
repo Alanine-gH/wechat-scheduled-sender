@@ -364,6 +364,14 @@
         <span class="pill" id="doctorMsg">未检查</span>
       </div>
       <div class="preview" id="doctorBox" style="display:none;margin-top:10px"></div>
+
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="reloadFails" type="button">查看待补发</button>
+        <button class="btn primary" id="retryFails" type="button">一键补发</button>
+        <button class="btn" id="clearFails" type="button">清理已解决</button>
+        <span class="pill" id="failMsg">–</span>
+      </div>
+      <div class="preview" id="failBox" style="display:none;margin-top:10px"></div>
     </section>
 
     <section class="card rise full" style="animation-delay:.23s">
@@ -1079,6 +1087,56 @@ async function runDoctor(){
   }
 }
 
+/* ---------- 失败补发 ---------- */
+async function loadFails(){
+  try{
+    const d = await api('/api/failures');
+    const items = d.items || [];
+    $('failMsg').textContent = `待补发 ${d.stats.pending} 条 · 涉及 ${d.stats.targets} 个目标 · 已解决 ${d.stats.resolved}`;
+    const box = $('failBox');
+    if(!items.length){
+      box.style.display = 'block';
+      box.innerHTML = '<div class="hlp" style="padding:12px;color:#9aa1b2">没有待补发的失败记录。'
+        + '发送失败会自动登记在这里，可以直接一键补发。</div>';
+      return;
+    }
+    const rows = items.map(r=>{
+      const kind = r.kind === 'hook' ? '钩子' : '主文案';
+      return `<tr>
+        <td style="white-space:nowrap">${escapeHtml(r.at_text||'')}</td>
+        <td>${escapeHtml(r.target||'')}</td>
+        <td>${kind}</td>
+        <td class="txt">${escapeHtml((r.text||'').slice(0,30))}</td>
+        <td style="white-space:nowrap">失败 ${r.attempts||1} 次</td>
+        <td class="txt" style="color:#b54708">${escapeHtml((r.error||'').slice(0,40))}</td>
+      </tr>`;
+    }).join('');
+    box.style.display = 'block';
+    box.innerHTML = `<table><thead><tr><th>最近失败</th><th>目标</th><th>类型</th>
+      <th>内容</th><th>次数</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }catch(e){ toast('读取失败记录：'+e.message); }
+}
+
+async function retryFails(){
+  try{
+    const d = await api('/api/failures');
+    if(!((d.items||[]).length)) return toast('没有待补发的记录');
+    await api('/api/failures/retry', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast('补发已启动，看下方运行日志');
+    startPolling();
+  }catch(e){ toast('补发失败：'+e.message); }
+}
+
+async function clearFails(){
+  try{
+    const r = await api('/api/failures/clear', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast(`已清理 ${r.cleared} 条已解决的记录`);
+    await loadFails();
+  }catch(e){ toast('清理失败：'+e.message); }
+}
+
 /* ---------- 生成计划 ---------- */
 async function genPlan(){
   const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
@@ -1353,6 +1411,11 @@ $('resetSettings').addEventListener('click', resetSettings);
 $('cleanupNow').addEventListener('click', cleanupNow);
 $('runDoctor').addEventListener('click', runDoctor);
 
+/* 失败补发 */
+$('reloadFails').addEventListener('click', loadFails);
+$('retryFails').addEventListener('click', retryFails);
+$('clearFails').addEventListener('click', clearFails);
+
 /* 自动运行 */
 $('reloadAuto').addEventListener('click', loadAuto);
 $('saveAutoTargets').addEventListener('click', saveAutoTargets);
@@ -1384,6 +1447,7 @@ async function loadPaths(){
     loadReport().catch(()=>{});
     loadSettings().catch(()=>{});
     loadAuto().catch(()=>{});
+    loadFails().catch(()=>{});
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));
   }
