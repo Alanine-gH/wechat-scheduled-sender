@@ -65,27 +65,38 @@ def save_state(data_dir: str, state: Dict[str, Any]) -> bool:
         return False
 
 
-def classify_text(text: str) -> str:
+def classify_text(text: str,
+                  need: Optional[List[str]] = None,
+                  hook: Optional[List[str]] = None) -> str:
     """给来消息打意图标签。
 
     返回 ``"need"``（提到客户/业务，高意向）、``"hook"``（只是要资料）、
     ``"other"``。按方案 3.1 节的分类：仅领资料 = 低意向，有具体客户 = 当天转组长。
+
+    关键词可由调用方传入（来自设置里的「高意向/低意向关键词」），
+    不传就用本模块的默认表 —— 业务词会变，写死不可调。
     """
     t = (text or "").lower()
-    if any(k.lower() in t for k in NEED_KEYWORDS):
+    need_kw = need if need else NEED_KEYWORDS
+    hook_kw = hook if hook else HOOK_KEYWORDS
+    if any(str(k).lower() in t for k in need_kw if str(k).strip()):
         return "need"
-    if any(k.lower() in t for k in HOOK_KEYWORDS):
+    if any(str(k).lower() in t for k in hook_kw if str(k).strip()):
         return "hook"
     return "other"
 
 
-def match_keywords(text: str) -> List[str]:
+def match_keywords(text: str,
+                   need: Optional[List[str]] = None,
+                   hook: Optional[List[str]] = None) -> List[str]:
     """命中的关键词列表（用于线索表里显示「他提到了什么」）。"""
     t = (text or "").lower()
-    hits = []
-    for k in list(NEED_KEYWORDS) + list(HOOK_KEYWORDS):
-        if k.lower() in t and k not in hits:
-            hits.append(k)
+    hits: List[str] = []
+    for k in list(need if need else NEED_KEYWORDS) \
+            + list(hook if hook else HOOK_KEYWORDS):
+        sk = str(k).strip()
+        if sk and sk.lower() in t and sk not in hits:
+            hits.append(sk)
     return hits
 
 
@@ -97,7 +108,9 @@ def poll_new(account: Optional[str] = None,
              data_dir: str = "",
              friends: Optional[List[Dict[str, Any]]] = None,
              per_chat_limit: int = 50,
-             include_history: bool = False) -> Dict[str, Any]:
+             include_history: bool = False,
+             need_keywords: Optional[List[str]] = None,
+             hook_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
     """轮询所有私聊会话，返回新收到的消息。
 
     ``include_history=False``（默认）时，**首次纳入轮询的会话只记游标、
@@ -173,8 +186,8 @@ def poll_new(account: Optional[str] = None,
                 "sort_seq": seq,
                 "type": m.get("type") or "",
                 "text": text,
-                "intent": classify_text(text),
-                "keywords": match_keywords(text),
+                "intent": classify_text(text, need_keywords, hook_keywords),
+                "keywords": match_keywords(text, need_keywords, hook_keywords),
             })
 
         chats[u] = {

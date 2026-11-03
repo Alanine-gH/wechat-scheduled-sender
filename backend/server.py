@@ -42,6 +42,7 @@ import autorun as autorun_mod  # noqa: E402
 import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
 import guard as guard_mod  # noqa: E402
+import housekeeping as house_mod  # noqa: E402
 import inbox as inbox_mod  # noqa: E402
 import leads as leads_mod  # noqa: E402
 import media as media_mod  # noqa: E402
@@ -324,6 +325,107 @@ def _run_events(engine, plan: dict) -> List[str]:
     return sent_main
 
 
+def _housekeep(reason: str = "") -> Dict[str, Any]:
+    """按保留天数回收截图与日志。
+
+    只删自己产生的东西（shots/ 下的日期目录、delivery_log.jsonl），
+    并把清单写进运行日志 —— 默默删掉的话，用户某天发现截图没了
+    会以为是 bug。
+    """
+    sc = schedule_config()
+    try:
+        r = house_mod.run_all(DATA_DIR, SHOT_DIR,
+                              int(sc.get("log_keep_days") or 0),
+                              int(sc.get("shot_keep_days") or 0))
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    files = r.get("total_files") or 0
+    dropped = r.get("logs", {}).get("dropped") or 0
+    if files or dropped:
+        mb = (r.get("total_bytes") or 0) / 1048576.0
+        RT.log("INFO", "清理%s：回收截图 %d 个文件（%.2f MB），"
+                       "清理日志 %d 条" % (("（%s）" % reason) if reason else "",
+                                        files, mb, dropped))
+    return r
+
+
+class InboxPoller:
+    """自动轮询私聊：定时读库把新线索登记进线索表。
+
+    为什么单独一个线程而不是塞进 AutoRunner：
+    两者的触发条件完全不同（一个按「每天几点」、一个按「每隔几秒」），
+    塞一起会让「该不该跑」的判断变成一团条件。
+    """
+
+    def __init__(self, data_dir: str, log) -> None:
+        self.data_dir = data_dir
+        self._log = log
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.last_poll = 0.0
+        self.last_added = 0
+        self.last_error = ""
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="inbox-poller")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    @property
+    def running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    def _loop(self) -> None:
+        if self._stop.wait(20):
+            return
+        while not self._stop.is_set():
+            try:
+                cfg = schedule_config()
+                if cfg.get("inbox_auto_poll"):
+                    st = settings_mod.load(self.data_dir)
+                    r = inbox_mod.poll_new(
+                        data_dir=self.data_dir,
+                        need_keywords=st.get("keywords_need"),
+                        hook_keywords=st.get("keywords_hook"),
+                    )
+                    if r.get("error"):
+                        self.last_error = r["error"]
+                    else:
+                        items = r.get("items") or []
+                        added = leads_mod.add_items(items, self.data_dir) \
+                            if items else 0
+                        self.last_poll = time.time()
+                        self.last_added = added
+                        self.last_error = ""
+                        if added:
+                            self._log("INFO", "自动轮询：新增 %d 条线索" % added)
+            except Exception as exc:
+                self.last_error = str(exc)
+                self._log("ERROR", "自动轮询异常：%s" % exc)
+            try:
+                wait_s = float(schedule_config().get("inbox_poll_seconds") or 300)
+            except Exception:
+                wait_s = 300.0
+            self._stop.wait(max(20.0, min(3600.0, wait_s)))
+
+    def status(self) -> Dict[str, Any]:
+        cfg = schedule_config()
+        return {
+            "thread_running": self.running,
+            "enabled": bool(cfg.get("inbox_auto_poll")),
+            "interval_seconds": cfg.get("inbox_poll_seconds"),
+            "last_poll": self.last_poll,
+            "last_added": self.last_added,
+            "last_error": self.last_error,
+        }
+
+
 def _auto_run(task: dict) -> bool:
     """自动运行的执行入口：建计划 + 起线程跑。返回是否真的触发了执行。
 
@@ -389,6 +491,8 @@ AUTORUN = autorun_mod.AutoRunner(
     is_busy=lambda: RT.running,
 )
 
+INBOX_POLLER = InboxPoller(DATA_DIR, log=lambda lvl, msg: RT.log(lvl, msg))
+
 
 def _run_plan(plan: dict) -> None:
     RT.running = True
@@ -418,6 +522,11 @@ def _run_plan(plan: dict) -> None:
         try:
             for t in sent_main:
                 scheduler.record_sent(t, DATA_DIR, kind="main")
+        except Exception:
+            pass
+        # 跑完顺手回收一次（截图是这次跑出来的，趁热清最省事）
+        try:
+            _housekeep("任务结束")
         except Exception:
             pass
         RT.running = False
@@ -577,7 +686,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 周报：投放量 + 线索量 + 6 项 KPI + 砍群建议
                 return self._json({"ok": True, **report_mod.weekly_report(DATA_DIR)})
             if p == "/api/inbox":
-                # 接收状态：各会话游标 + 本周线索概览
+                # 接收状态：各会话游标 + 自动轮询状态
                 st = inbox_mod.load_state(DATA_DIR)
                 chats = st.get("chats") or {}
                 return self._json({
@@ -585,6 +694,7 @@ class Handler(BaseHTTPRequestHandler):
                     "chats": len(chats),
                     "detail": {v.get("name") or k: v.get("cursor")
                                for k, v in chats.items()},
+                    "poller": INBOX_POLLER.status(),
                 })
             if p == "/api/leads":
                 # 线索表：列表 + 统计（可按状态/意图过滤）
@@ -809,6 +919,10 @@ class Handler(BaseHTTPRequestHandler):
                 autorun_mod.save_task(DATA_DIR, last_run_day="", last_result="")
                 return self._json({"ok": True, **AUTORUN.status()})
 
+            if p == "/api/cleanup":
+                # 手动清理一次（界面上的「立即清理」按钮）
+                return self._json({"ok": True, **_housekeep("手动")})
+
             if p == "/api/media":
                 # 预览素材：只收集不发送，让用户确认选对了
                 spec = body.get("media") or body or {}
@@ -845,10 +959,13 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/inbox/poll":
                 # 轮询私聊新消息（读库，不注入进程）
                 body = body or {}
+                st = settings_mod.load(DATA_DIR)
                 r = inbox_mod.poll_new(
                     account=body.get("account"),
                     data_dir=DATA_DIR,
                     include_history=bool(body.get("include_history")),
+                    need_keywords=st.get("keywords_need"),
+                    hook_keywords=st.get("keywords_hook"),
                 )
                 if r.get("error"):
                     return self._json({"ok": False, "error": r["error"]}, 500)
@@ -927,6 +1044,18 @@ def main(host="127.0.0.1", port=8791, token="", quiet=False):
             print("  自动运行: 已启用，到点自动执行", flush=True)
     except Exception as exc:
         print("  自动运行守护启动失败: %s" % exc, flush=True)
+
+    # 启动时按保留天数回收一次（长期常驻程序，磁盘不能只涨不落）
+    try:
+        _housekeep("启动")
+    except Exception:
+        pass
+
+    # 自动轮询私聊（同样自己读开关，用户中途打开无需重启）
+    try:
+        INBOX_POLLER.start()
+    except Exception as exc:
+        print("  自动轮询启动失败: %s" % exc, flush=True)
 
     # Electron 主进程靠这一行拿到端口
     print("PORT=%d" % actual_port, flush=True)
