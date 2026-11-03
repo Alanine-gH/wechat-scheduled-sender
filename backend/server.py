@@ -41,6 +41,7 @@ userdata.configure(os.environ.get("WCS_DATA_ROOT"))
 import autorun as autorun_mod  # noqa: E402
 import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
+import doctor as doctor_mod  # noqa: E402
 import guard as guard_mod  # noqa: E402
 import housekeeping as house_mod  # noqa: E402
 import inbox as inbox_mod  # noqa: E402
@@ -105,6 +106,11 @@ def schedule_config() -> Dict[str, Any]:
         "auto_grace_minutes": int(s["auto_grace_minutes"]),
         "inbox_auto_poll": bool(s["inbox_auto_poll"]),
         "inbox_poll_seconds": int(s["inbox_poll_seconds"]),
+        # 清理与关键词也必须在这里透出：_housekeep() 从这份投影里读保留天数，
+        # 漏掉会回落到 0（= 不清理），自动清理就永远不生效 ——
+        # 实测就是这么发生的，是「健康自检」把它揪出来的。
+        "log_keep_days": int(s["log_keep_days"]),
+        "shot_keep_days": int(s["shot_keep_days"]),
         "hook_days": list(s["hook_days"]),
         "run_days": list(s["run_days"]),
         "enforce_window": bool(s["enforce_window"]),
@@ -682,6 +688,13 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/auto":
                 # 自动运行状态：该不该跑、为什么、上次结果、已保存的目标
                 return self._json({"ok": True, **AUTORUN.status()})
+            if p == "/api/doctor":
+                # 健康自检：一次把依赖链上的关键点全查一遍
+                sc = schedule_config()
+                acc = (q.get("account") or [None])[0]
+                return self._json({"ok": True, **doctor_mod.run(
+                    DATA_DIR, SHOT_DIR, acc,
+                    int(sc.get("shot_keep_days") or 0))})
             if p == "/api/report":
                 # 周报：投放量 + 线索量 + 6 项 KPI + 砍群建议
                 return self._json({"ok": True, **report_mod.weekly_report(DATA_DIR)})

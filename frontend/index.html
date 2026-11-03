@@ -358,6 +358,12 @@
         <div class="metric"><div class="k">总数</div><div class="v" id="pTotal">0</div></div>
       </div>
       <div class="warn" id="wxWarn" style="display:none">未检测到微信窗口，请先启动并登录微信。</div>
+
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="runDoctor" type="button">健康自检</button>
+        <span class="pill" id="doctorMsg">未检查</span>
+      </div>
+      <div class="preview" id="doctorBox" style="display:none;margin-top:10px"></div>
     </section>
 
     <section class="card rise full" style="animation-delay:.23s">
@@ -1044,6 +1050,35 @@ async function autoResetDay(){
   }catch(e){ toast('操作失败：'+e.message); }
 }
 
+/* ---------- 健康自检 ---------- */
+const DOCTOR_TAG = { ok: '正常', warn: '提醒', error: '异常' };
+
+async function runDoctor(){
+  $('doctorMsg').textContent = '检查中…';
+  try{
+    const d = await api('/api/doctor'
+      + ($('accountSel').value ? '?account=' + encodeURIComponent($('accountSel').value) : ''));
+    const color = d.ok ? '#12946b' : '#b42318';
+    $('doctorMsg').innerHTML = `<span style="color:${color}">${escapeHtml(d.summary)}</span>`;
+    const rows = (d.checks||[]).map(c=>{
+      const col = c.status === 'ok' ? '#12946b' : (c.status === 'warn' ? '#b54708' : '#b42318');
+      return `<tr>
+        <td style="white-space:nowrap;color:${col};font-weight:600">${DOCTOR_TAG[c.status]||c.status}</td>
+        <td style="white-space:nowrap">${escapeHtml(c.name)}</td>
+        <td class="txt">${escapeHtml(c.detail)}</td>
+        <td class="txt" style="color:#6b7280">${escapeHtml(c.hint||'')}</td>
+      </tr>`;
+    }).join('');
+    $('doctorBox').style.display = 'block';
+    $('doctorBox').innerHTML =
+      `<table><thead><tr><th>结果</th><th>检查项</th><th>现状</th><th>建议</th></tr></thead>
+       <tbody>${rows}</tbody></table>`;
+  }catch(e){
+    $('doctorMsg').textContent = '自检失败';
+    toast('自检失败：' + e.message);
+  }
+}
+
 /* ---------- 生成计划 ---------- */
 async function genPlan(){
   const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
@@ -1316,6 +1351,7 @@ $('reloadSettings').addEventListener('click', loadSettings);
 $('saveSettings').addEventListener('click', ()=>saveSettings(collectSettings()));
 $('resetSettings').addEventListener('click', resetSettings);
 $('cleanupNow').addEventListener('click', cleanupNow);
+$('runDoctor').addEventListener('click', runDoctor);
 
 /* 自动运行 */
 $('reloadAuto').addEventListener('click', loadAuto);
