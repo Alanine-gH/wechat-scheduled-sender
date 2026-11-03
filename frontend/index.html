@@ -271,6 +271,47 @@
       <div class="note" id="mediaTip" style="display:none"></div>
     </section>
 
+    <section class="card rise" style="animation-delay:.14s">
+      <h2>2.7 · 内容编排（定时投放）</h2>
+      <p class="hint">按运营方案：<b>每天 1 条</b>固定时间发「当日引导语 + 原文案」，
+        原文案<b>一字不改</b>；文案发出 <b>30 分钟</b>后补发资料钩子，
+        钩子只在<b>周二/周四/周六</b>投，避免刷屏被踢。</p>
+
+      <div class="row" style="margin-bottom:10px">
+        <label class="chk" style="margin:0">
+          <input type="checkbox" id="useCampaign">
+          <span>启用内容编排（关闭则用下面的「消息池 + 间隔」模式）</span>
+        </label>
+      </div>
+
+      <div id="campaignBox" style="display:none">
+        <div class="row">
+          <label class="lbl" style="margin:0">每天起始时间</label>
+          <input id="startAt" type="time" value="20:00" style="width:130px">
+          <label class="lbl" style="margin:0 0 0 14px">钩子延迟（分钟）</label>
+          <input id="hookDelay" type="number" min="0" step="5" value="30" style="width:90px">
+          <label class="lbl" style="margin:0 0 0 14px">每群每周上限</label>
+          <input id="weeklyCap" type="number" min="0" step="1" value="0" style="width:90px">
+          <span class="pill" id="weekInfo">–</span>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <label class="lbl" style="margin:0">钩子投放日</label>
+          <span id="hookDays"></span>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="saveSchedule" type="button">保存调度配置</button>
+          <button class="btn" id="reloadSchedule" type="button">重新读取</button>
+          <button class="btn" id="resetWeek" type="button">清空本周计数</button>
+          <span class="pill" id="campSummary">–</span>
+        </div>
+
+        <div class="preview" id="campPreview" style="display:none;margin-top:12px"></div>
+        <div class="note" id="campTip" style="display:none"></div>
+      </div>
+    </section>
+
     <section class="card rise" style="animation-delay:.15s">
       <h2>3 · 计划参数</h2>
       <p class="hint">随机种子固定为当天日期，同一天的计划可复现。
@@ -317,6 +358,35 @@
         <div class="metric"><div class="k">总数</div><div class="v" id="pTotal">0</div></div>
       </div>
       <div class="warn" id="wxWarn" style="display:none">未检测到微信窗口，请先启动并登录微信。</div>
+    </section>
+
+    <section class="card rise full" style="animation-delay:.23s">
+      <h2>5 · 线索与周报</h2>
+      <p class="hint">方案的重心不在「发」而在「收」。这里轮询本地数据库找出
+        <b>主动私聊你的群友</b>（无需 hook），登记成线索并跟踪跟进状态。</p>
+
+      <div class="row" style="margin-bottom:10px">
+        <button class="btn primary" id="pollInbox" type="button">拉取新私聊</button>
+        <button class="btn" id="reloadLeads" type="button">刷新线索</button>
+        <button class="btn" id="exportLeads" type="button">导出 CSV</button>
+        <button class="btn" id="reloadReport" type="button">刷新周报</button>
+        <select id="leadFilter" style="width:150px">
+          <option value="">全部线索</option>
+          <option value="new">待筛选</option>
+          <option value="material">已发资料</option>
+          <option value="escalated">已转组长</option>
+          <option value="won">已成交</option>
+          <option value="nurture">长期培育</option>
+          <option value="invalid">无效</option>
+        </select>
+        <span class="pill" id="leadCount">–</span>
+      </div>
+
+      <div class="metrics" id="kpiBox" style="grid-template-columns:repeat(6,1fr)"></div>
+
+      <div id="reportTip" class="note" style="display:none;margin-top:10px"></div>
+
+      <div class="preview" id="leadsBox" style="display:none;margin-top:12px"></div>
     </section>
 
     <section class="card rise full" style="animation-delay:.25s">
@@ -601,6 +671,188 @@ function setMediaSource(src){
   $('mediaPickedRow').style.display = src === 'picked' ? 'block' : 'none';
 }
 
+/* ---------- 内容编排 / 调度配置 ---------- */
+const WEEKDAYS = [['mon','周一'],['tue','周二'],['wed','周三'],['thu','周四'],
+                  ['fri','周五'],['sat','周六'],['sun','周日']];
+let scheduleCfg = { hook_days: ['tue','thu','sat'], start_at: '20:00',
+                    hook_delay_minutes: 30, weekly_cap: 0 };
+
+function renderHookDays(){
+  const box = $('hookDays');
+  box.innerHTML = WEEKDAYS.map(([k,cn])=>{
+    const on = (scheduleCfg.hook_days||[]).includes(k);
+    return `<label class="chk" style="display:inline-flex;margin:0 8px 0 0">
+      <input type="checkbox" data-day="${k}" ${on?'checked':''}><span>${cn}</span></label>`;
+  }).join('');
+}
+
+function applySchedule(c){
+  if(!c) return;
+  scheduleCfg = Object.assign({}, scheduleCfg, c);
+  if(c.start_at) $('startAt').value = c.start_at;
+  if(c.hook_delay_minutes != null) $('hookDelay').value = c.hook_delay_minutes;
+  if(c.weekly_cap != null) $('weeklyCap').value = c.weekly_cap;
+  renderHookDays();
+}
+
+async function loadSchedule(){
+  try{
+    const c = await api('/api/schedule');
+    applySchedule(c);
+    await loadCampaign();
+  }catch(e){ toast('读取调度配置失败：'+e.message); }
+}
+
+async function loadCampaign(){
+  try{
+    const d = await api('/api/campaign');
+    applySchedule(d);
+    const camp = d.campaign || {};
+    $('campSummary').textContent = `引导语 ${camp.guide_count||0} 条 · 正文 ${camp.body_lines||0} 行 · 钩子 ${camp.hooks||0} 条`;
+    $('weekInfo').textContent = `本周已发：${Object.keys(d.state||{}).length} 个群`;
+    const box = $('campPreview');
+    box.style.display = 'block';
+    const guides = WEEKDAYS.map(([k,cn])=>{
+      const g = (camp.guides||{})[k] || '（未填）';
+      return `<tr><td>${cn}</td><td class="txt">${escapeHtml(g)}</td></tr>`;
+    }).join('');
+    box.innerHTML = `<table><thead><tr><th>星期</th><th>当日引导语</th></tr></thead>
+      <tbody>${guides}</tbody></table>
+      <div style="margin-top:10px"><b>今天（${d.today_cn}）会发：</b>
+      <div class="txt" style="white-space:pre-wrap;background:#fbfcfe;border:1px solid var(--line);
+        border-radius:9px;padding:10px;margin-top:6px">${escapeHtml(d.main_preview||'（空）')}</div></div>
+      <div style="margin-top:10px"><b>今天是钩子日吗：</b>${d.hook_today?'是':'否'}
+      ${d.hook_preview?`<div class="txt" style="white-space:pre-wrap;background:#fbfcfe;border:1px solid var(--line);
+        border-radius:9px;padding:10px;margin-top:6px">${escapeHtml(d.hook_preview)}</div>`:''}</div>`;
+    const tip = $('campTip');
+    tip.style.display = 'block';
+    tip.textContent = '内容在 data/campaign.txt 里改（引导语按 [mon]..[sun]，'
+      + '正文就是你原来的 messages.txt，钩子在「# === 钩子 ===」段）。改完点「重新读取」。';
+  }catch(e){
+    $('campTip').style.display = 'block';
+    $('campTip').textContent = '读取内容编排失败：' + e.message
+      + '（确认 data/campaign.txt 存在，可从 campaign.example.txt 复制）';
+  }
+}
+
+async function saveSchedule(){
+  const days = [...document.querySelectorAll('#hookDays input[data-day]')]
+    .filter(x=>x.checked).map(x=>x.dataset.day);
+  if(!days.length) return toast('至少要选一个钩子投放日');
+  try{
+    const c = await api('/api/schedule', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        start_at: $('startAt').value || '20:00',
+        hook_delay_minutes: +$('hookDelay').value || 0,
+        weekly_cap: +$('weeklyCap').value || 0,
+        hook_days: days
+      })});
+    applySchedule(c);
+    toast('调度配置已保存');
+  }catch(e){ toast('保存失败：'+e.message); }
+}
+
+/* ---------- 线索与周报 ---------- */
+async function pollInbox(){
+  toast('正在拉取私聊…');
+  try{
+    const r = await api('/api/inbox/poll', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast(`扫描 ${r.scanned} 个会话，新增线索 ${r.added||0} 条`
+      + (r.bootstrapped && r.bootstrapped.length ? `，首次登记 ${r.bootstrapped.length} 个会话` : ''));
+    await loadLeads();
+  }catch(e){ toast('拉取失败：'+e.message); }
+}
+
+async function loadLeads(){
+  try{
+    const st = $('leadFilter').value;
+    const d = await api('/api/leads' + (st ? '?status='+st : ''));
+    const rows = (d.leads||[]);
+    $('leadCount').textContent = `${rows.length} 条 · 共 ${d.stats?.total||0} 条`;
+    const box = $('leadsBox');
+    if(!rows.length){
+      box.style.display = 'block';
+      box.innerHTML = '<div class="hlp" style="padding:12px;color:#9aa1b2">'
+        + '还没有线索。点「拉取新私聊」开始收集。<br>'
+        + '注意：首次拉取只登记游标、不产出历史消息，避免把旧聊天当成新线索。</div>';
+      return;
+    }
+    const trs = rows.map(r=>{
+      const t = r.at ? new Date(r.at*1000).toLocaleString('zh-CN',{hour12:false}) : '';
+      const kw = (r.keywords||[]).map(k=>`<span class="pill">${escapeHtml(k)}</span>`).join(' ');
+      const opts = (d.statuses||[]).map(s=>
+        `<option value="${s.key}" ${s.key===r.status?'selected':''}>${s.cn}</option>`).join('');
+      return `<tr>
+        <td style="white-space:nowrap">${t}</td>
+        <td>${escapeHtml(r.name||'')}</td>
+        <td>${r.intent_cn||''}</td>
+        <td class="txt">${escapeHtml((r.text||'').slice(0,40))}</td>
+        <td style="white-space:nowrap">${kw}</td>
+        <td><select data-lid="${r.id}" class="leadSt" style="width:110px">${opts}</select></td>
+        <td><input data-lid="${r.id}" class="leadNote" value="${escapeHtml(r.note||'')}"
+             placeholder="备注" style="width:110px"></td>
+      </tr>`;
+    }).join('');
+    box.style.display = 'block';
+    box.innerHTML = `<table><thead><tr><th>时间</th><th>昵称</th><th>意图</th>
+      <th>内容</th><th>关键词</th><th>跟进状态</th><th>备注</th></tr></thead>
+      <tbody>${trs}</tbody></table>`;
+    box.querySelectorAll('select.leadSt').forEach(sel=>{
+      sel.addEventListener('change', ()=>updateLead(sel.dataset.lid, {status: sel.value}));
+    });
+    box.querySelectorAll('input.leadNote').forEach(inp=>{
+      inp.addEventListener('change', ()=>updateLead(inp.dataset.lid, {note: inp.value}));
+    });
+  }catch(e){ toast('读取线索失败：'+e.message); }
+}
+
+async function updateLead(id, patch){
+  try{
+    await api('/api/leads/update', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(Object.assign({id}, patch))});
+    toast('已更新');
+    await loadReport();
+  }catch(e){ toast('更新失败：'+e.message); }
+}
+
+async function exportLeads(){
+  try{
+    const r = await api('/api/leads/export', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    if(r.ok) toast(`已导出 ${r.rows} 条到 ${r.path}`);
+    else toast('导出失败：'+(r.error||''));
+  }catch(e){ toast('导出失败：'+e.message); }
+}
+
+async function loadReport(){
+  try{
+    const d = await api('/api/report');
+    const kpi = d.kpi || [];
+    $('kpiBox').innerHTML = kpi.map(k=>{
+      const color = k.ok ? '#12946b' : '#b54708';
+      return `<div class="metric">
+        <div class="k">${escapeHtml(k.name)}</div>
+        <div class="v" style="color:${color}">${k.value}</div>
+        <div class="k" style="margin-top:2px">目标 ${escapeHtml(k.target)}</div></div>`;
+    }).join('');
+    const tip = $('reportTip');
+    tip.style.display = 'block';
+    const dels = d.delivery || {};
+    let txt = `本周 ${d.week}：投放 ${dels.main_ok||0} 主 / ${dels.hook_ok||0} 钩`
+      + (dels.main_fail||dels.hook_fail ? `（失败 ${(dels.main_fail||0)+(dels.hook_fail||0)}）` : '')
+      + `，KPI 达成 ${d.kpi_passed}/${d.kpi_total}。`;
+    if((d.cut_candidates||[]).length){
+      txt += ' 建议降频/退出的群：'
+        + d.cut_candidates.map(c=>`${c.target}（${c.per_week.join('→')} 人）`).join('、') + '。';
+    }
+    txt += ' ' + (d.note || '');
+    tip.textContent = txt;
+  }catch(e){ /* 周报可选，失败不打扰 */ }
+}
+
 /* ---------- 生成计划 ---------- */
 async function genPlan(){
   const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
@@ -612,37 +864,111 @@ async function genPlan(){
     account: $('accountSel').value,
     media: mediaSpec()
   };
+  // 启用编排时带上调度参数，后端走「绝对时间 + 双波次」模式
+  if($('useCampaign').checked){
+    body.campaign = true;
+    body.start_at = $('startAt').value || '20:00';
+    body.hook_delay_min = +$('hookDelay').value || 0;
+    body.weekly_cap = +$('weeklyCap').value || 0;
+    body.hook_days = [...document.querySelectorAll('#hookDays input[data-day]')]
+      .filter(x=>x.checked).map(x=>x.dataset.day);
+  }
   try{
     const r = await api('/api/plan', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(body)});
     state.plan = r.plan;
     state.plan._targets = targets;
     const p = r.plan;
+    // 合规警告：后端在生成计划时已校验，这里把结果告诉用户
+    const g = p.guard;
+    if(g && (g.warned||[]).length){
+      toast(`计划已生成，但有 ${g.warned.length} 处措辞风险，见提示`);
+    }else{
+      toast('计划已生成');
+    }
+
+    if(p.mode === 'campaign'){
+      // 编排模式：绝对时间事件表（主文案 + 钩子）
+      $('planSum').textContent = `${p.total_messages} 个事件`
+        + `（主文案 ${p.main_count} + 钩子 ${p.hook_count}）· 覆盖 ${p.target_count} 个目标`
+        + ` · 起点 ${(p.events[0]||{}).at ? p.events[0].at.slice(11,16) : '—'}`
+        + ` · 跨度约 ${p.span_minutes} 分钟 · ${p.weekday_cn}`;
+      if(p.blocked_reason){
+        $('planPreview').style.display='block';
+        $('planPreview').innerHTML = `<div class="note" style="display:block">${escapeHtml(p.blocked_reason)}</div>`;
+        return;
+      }
+      const rows = (p.events||[]).map(e=>{
+        const kind = e.kind==='hook' ? '钩子' : '主文案';
+        const first = escapeHtml((e.text||'').split('\n')[0].slice(0,28));
+        const media = e.media_path ? ` <span class="pill">${escapeHtml(e.media_path.split(/[\\/]/).pop())}</span>` : '';
+        return `<tr><td>${e.at.slice(11,16)}</td><td>${kind}</td>
+          <td>${escapeHtml(e.target||'')}</td><td class="txt">${first}${media}</td></tr>`;
+      }).join('');
+      let extra = '';
+      if((p.skipped_by_cap||[]).length){
+        extra = `<div class="note" style="display:block">因本周达到上限而跳过：`
+          + p.skipped_by_cap.map(escapeHtml).join('、') + '</div>';
+      }
+      if(g && (g.warned||[]).length){
+        extra += `<div class="note" style="display:block">措辞风险：`
+          + g.warned.map(w=>`${escapeHtml(w.label)}（${w.hits.map(escapeHtml).join('、')}）`).join('；')
+          + '</div>';
+      }
+      $('planPreview').style.display='block';
+      $('planPreview').innerHTML = `<table><thead><tr><th>时间</th><th>类型</th>
+        <th>目标</th><th>内容（首行）</th></tr></thead><tbody>${rows}</tbody></table>${extra}`;
+      return;
+    }
+
     const perTgt = p.target_count ? (p.total_messages / p.target_count) : 0;
     $('planSum').textContent = `${p.total_messages} 条 · 覆盖 ${p.target_count} 个目标`
       + `（平均每个 ${perTgt.toFixed(2)} 条）· 约 ${p.estimated_minutes} 分钟 · 种子 ${p.seed_date}`;
-    const rows = p.round_plans.map(rp=>{
-      const t = (rp.messages||[]).slice(0,3).map(m=>escapeHtml(m.split('\n')[0])).join(' / ');
+    const rows = (p.round_plans||[]).map(rp=>{
+      const t = (rp.messages||[]).slice(0,3).map(m=>escapeHtml((m||'').split('\n')[0])).join(' / ');
       return `<tr><td>第 ${rp.index} 轮</td><td>${rp.delay_minutes} 分</td>
         <td>${rp.count} 条</td><td class="txt">${t}${rp.count>3?' …':''}</td></tr>`;
     }).join('');
+    let warn = '';
+    if(g && (g.warned||[]).length){
+      warn = `<div class="note" style="display:block">措辞风险：`
+        + g.warned.map(w=>`${escapeHtml(w.label)}（${w.hits.map(escapeHtml).join('、')}）`).join('；')
+        + '</div>';
+    }
     $('planPreview').style.display='block';
-    $('planPreview').innerHTML = `<table><thead><tr><th>轮次</th><th>本轮总等待</th><th>条数</th><th>消息预览（首行）</th></tr></thead><tbody>${rows}</tbody></table>`;
-    toast('计划已生成');
+    $('planPreview').innerHTML = `<table><thead><tr><th>轮次</th><th>本轮总等待</th><th>条数</th><th>消息预览（首行）</th></tr></thead><tbody>${rows}</tbody></table>${warn}`;
   }catch(e){ toast('生成计划失败：'+e.message); }
 }
 
 /* ---------- 执行 ---------- */
 async function start(){
   if(!state.plan) return toast('请先生成计划预览');
-  // 把目标对象（含 wxid）绑定到每个 pair，确保按 wxid 精确发送
-  const tlist = state.plan._targets || [...state.selected.values()].map(x=>({name:x.name, username:x.username}));
+  const tlist = state.plan._targets || [...state.selected.values()]
+    .map(x=>({name:x.name, username:x.username}));
   if(!tlist.length) return toast('请先选择目标');
-  state.plan.assignments = state.plan.assignments.map(a=>({...a,
-    pairs: a.pairs.map((pr,i)=>{
-      const t = tlist[i % tlist.length];
-      return {target: t.name, username: t.username, text: pr.text};
-    })}));
+
+  if(state.plan.mode === 'campaign'){
+    // 编排模式：事件表已由后端定好时间与内容，**不要重建**。
+    // 只补一张「群名 -> wxid」表，执行器靠它按 wxid 精确发送。
+    const byName = {};
+    tlist.forEach(t=>{ byName[t.name] = t.username; });
+    state.plan.username_of = byName;
+  }else{
+    // 老模式：把目标对象（含 wxid）绑定到每个 pair。
+    // 注意必须**展开原 pair 再覆盖**，否则 media_path / media_first 会被丢掉
+    // （之前就是这样，导致从界面走素材发送失效）。
+    state.plan.assignments = (state.plan.assignments||[]).map(a=>({...a,
+      pairs: a.pairs.map((pr,i)=>{
+        const t = tlist[i % tlist.length];
+        return Object.assign({}, pr, {
+          target: t.name, username: t.username, text: pr.text,
+        });
+      })}));
+  }
+
+  if(!(state.plan.events||[]).length && !(state.plan.assignments||[]).length){
+    return toast('计划为空，无法开始');
+  }
   $('startBtn').disabled = true;
   try{
     await api('/api/start', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -772,6 +1098,28 @@ $('mediaFileInput').addEventListener('change', ev=>{
 renderPicked();
 setMediaSource('none');
 
+/* 内容编排 */
+$('useCampaign').addEventListener('change', ()=>{
+  $('campaignBox').style.display = $('useCampaign').checked ? 'block' : 'none';
+  if($('useCampaign').checked) loadSchedule();
+});
+$('saveSchedule').addEventListener('click', saveSchedule);
+$('reloadSchedule').addEventListener('click', loadSchedule);
+$('resetWeek').addEventListener('click', async ()=>{
+  try{
+    await api('/api/schedule/reset', {method:'POST'});
+    toast('本周计数已清空');
+    await loadCampaign();
+  }catch(e){ toast('清空失败：'+e.message); }
+});
+
+/* 线索与周报 */
+$('pollInbox').addEventListener('click', pollInbox);
+$('reloadLeads').addEventListener('click', loadLeads);
+$('exportLeads').addEventListener('click', exportLeads);
+$('reloadReport').addEventListener('click', loadReport);
+$('leadFilter').addEventListener('change', loadLeads);
+
 /* ---------- 启动 ---------- */
 async function loadPaths(){
   try{
@@ -791,6 +1139,10 @@ async function loadPaths(){
     console.log('[wcs] 界面就绪  账号=' + $('accountSel').value
       + '  群=' + state.groups.length + '  好友=' + state.friends.length
       + '  消息池=' + $('mPool').textContent);
+
+    // 线索与周报是可选模块，失败不应影响主流程
+    loadLeads().catch(()=>{});
+    loadReport().catch(()=>{});
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));
   }
