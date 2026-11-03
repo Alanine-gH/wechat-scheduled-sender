@@ -38,6 +38,7 @@ import userdata
 
 userdata.configure(os.environ.get("WCS_DATA_ROOT"))
 
+import autorun as autorun_mod  # noqa: E402
 import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
 import guard as guard_mod  # noqa: E402
@@ -98,6 +99,9 @@ def schedule_config() -> Dict[str, Any]:
         "clear_input_before": bool(s["clear_input_before"]),
         "auto_enabled": bool(s["auto_enabled"]),
         "auto_check_seconds": int(s["auto_check_seconds"]),
+        # auto_grace_minutes 必须在这里透出：due() 从这份投影里读它，
+        # 漏掉的话会回落到 0（= 过点就不补跑），程序晚开一分钟就永远不发。
+        "auto_grace_minutes": int(s["auto_grace_minutes"]),
         "inbox_auto_poll": bool(s["inbox_auto_poll"]),
         "inbox_poll_seconds": int(s["inbox_poll_seconds"]),
         "hook_days": list(s["hook_days"]),
@@ -320,6 +324,72 @@ def _run_events(engine, plan: dict) -> List[str]:
     return sent_main
 
 
+def _auto_run(task: dict) -> bool:
+    """自动运行的执行入口：建计划 + 起线程跑。返回是否真的触发了执行。
+
+    由 AutoRunner 调用。守护只负责判断「该不该跑」，建计划和发送在这里 ——
+    这样 autorun 模块不依赖 server 的任何内部实现。
+    """
+    if RT.running:
+        return False
+    entries = [t for t in (task.get("targets") or []) if t.get("name")]
+    if not entries:
+        RT.log("WARN", "自动运行：目标名单为空，跳过")
+        return False
+    targets = [t["name"] for t in entries]
+
+    if not find_wechat_window():
+        RT.log("WARN", "自动运行：未找到微信窗口（可能未登录），本轮跳过")
+        return False
+
+    cfg = schedule_config()
+    camp = campaign_mod.load_campaign(CAMPAIGN_FILE)
+    try:
+        plan = planner.build_campaign_plan(
+            targets=targets, campaign_obj=camp,
+            start_at=cfg["start_at"],
+            interval_min=cfg["interval_min"], interval_max=cfg["interval_max"],
+            hook_delay_min=cfg["hook_delay_minutes"], hook_days=cfg["hook_days"],
+            weekly_cap=cfg["weekly_cap"], daily_cap=cfg["daily_cap"],
+            run_cap=cfg["run_cap"],
+            enforce_window=cfg["enforce_window"],
+            window_start=cfg["send_window_start"],
+            window_end=cfg["send_window_end"],
+            data_dir=DATA_DIR,
+        )
+    except Exception as exc:
+        RT.log("ERROR", "自动运行建计划失败：%s" % exc)
+        return False
+
+    # 按名字绑 wxid，执行器靠它精确发送
+    plan["username_of"] = {t["name"]: t.get("username") for t in entries}
+    plan["auto"] = True
+
+    if not plan.get("events"):
+        why = plan.get("blocked_reason") or (
+            "所有目标都达到上限" if plan.get("skipped_by_cap") else "没有可发的事件")
+        RT.log("WARN", "自动运行：本轮没有要发的内容（%s）" % why)
+        return False
+
+    RT.logs = []
+    RT.plan = plan
+    RT.log("INFO", "自动运行开始：%d 个事件，覆盖 %d 个目标"
+           % (plan["total_messages"], plan["target_count"]))
+    th = threading.Thread(target=_run_plan, args=(plan,), daemon=True)
+    RT.thread = th
+    th.start()
+    return True
+
+
+AUTORUN = autorun_mod.AutoRunner(
+    DATA_DIR,
+    cfg_loader=schedule_config,
+    run_fn=_auto_run,
+    log=lambda lvl, msg: RT.log(lvl, msg),
+    is_busy=lambda: RT.running,
+)
+
+
 def _run_plan(plan: dict) -> None:
     RT.running = True
     RT.started_at = time.time()
@@ -500,6 +570,9 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/settings":
                 # 全部设置：当前值 + 表单描述（分组）
                 return self._json({"ok": True, **settings_mod.describe(DATA_DIR)})
+            if p == "/api/auto":
+                # 自动运行状态：该不该跑、为什么、上次结果、已保存的目标
+                return self._json({"ok": True, **AUTORUN.status()})
             if p == "/api/report":
                 # 周报：投放量 + 线索量 + 6 项 KPI + 砍群建议
                 return self._json({"ok": True, **report_mod.weekly_report(DATA_DIR)})
@@ -703,6 +776,39 @@ class Handler(BaseHTTPRequestHandler):
                 settings_mod.reset(DATA_DIR, keys)
                 return self._json({"ok": True, **settings_mod.describe(DATA_DIR)})
 
+            if p == "/api/auto/targets":
+                # 保存自动任务的目标名单（含 wxid，执行时要精确发送）
+                body = body or {}
+                entries = []
+                for t in (body.get("targets") or []):
+                    if isinstance(t, dict) and t.get("name"):
+                        entries.append({"name": t["name"],
+                                        "username": t.get("username") or ""})
+                    elif isinstance(t, str) and t:
+                        entries.append({"name": t, "username": ""})
+                autorun_mod.save_task(DATA_DIR, targets=entries)
+                return self._json({"ok": True, "saved": len(entries),
+                                   **AUTORUN.status()})
+
+            if p == "/api/auto/run-now":
+                # 立刻按自动任务的配置跑一轮（用于验证，不等时间点）
+                task = autorun_mod.load_task(DATA_DIR)
+                if not (task.get("targets") or []):
+                    return self._json({"ok": False,
+                                       "error": "自动任务还没有目标，请先保存名单"}, 400)
+                if RT.running:
+                    return self._json({"ok": False, "error": "已有任务在执行"}, 409)
+                fired = _auto_run(task)
+                if not fired:
+                    return self._json({"ok": False,
+                                       "error": "未能启动（详见运行日志）"}, 500)
+                return self._json({"ok": True, "started": True})
+
+            if p == "/api/auto/reset-day":
+                # 清掉「今天已跑过」的标记，允许今天再跑一次
+                autorun_mod.save_task(DATA_DIR, last_run_day="", last_result="")
+                return self._json({"ok": True, **AUTORUN.status()})
+
             if p == "/api/media":
                 # 预览素材：只收集不发送，让用户确认选对了
                 spec = body.get("media") or body or {}
@@ -812,6 +918,15 @@ def main(host="127.0.0.1", port=8791, token="", quiet=False):
 
     srv = ThreadingHTTPServer((host, port), Handler)
     actual_port = srv.server_address[1]
+
+    # 拉起自动运行守护。它每轮自己读设置里的 auto_enabled，
+    # 所以这里无条件启动 —— 用户中途打开开关无需重启程序。
+    try:
+        AUTORUN.start()
+        if schedule_config().get("auto_enabled"):
+            print("  自动运行: 已启用，到点自动执行", flush=True)
+    except Exception as exc:
+        print("  自动运行守护启动失败: %s" % exc, flush=True)
 
     # Electron 主进程靠这一行拿到端口
     print("PORT=%d" % actual_port, flush=True)

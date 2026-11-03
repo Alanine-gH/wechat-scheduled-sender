@@ -60,6 +60,10 @@ DEFAULTS: Dict[str, Any] = {
     # 自动运行
     "auto_enabled": False,               # 到点自动执行
     "auto_check_seconds": 60,            # 守护线程检查间隔
+    # 宽限：程序在 20:00 之后才打开时，还允许补跑多久。
+    # 不设宽限的话，晚上 23 点才打开程序会立刻发一轮 —— 那个时间点发消息
+    # 比不发更糟。设为 0 表示「过了点就不补跑」。
+    "auto_grace_minutes": 30,
 
     # 接收
     "inbox_auto_poll": False,            # 自动轮询私聊
@@ -134,6 +138,9 @@ SCHEMA: List[Dict[str, Any]] = [
      "type": "bool", "help": "程序常驻时，到点自动按计划执行，不用每天手动点"},
     {"key": "auto_check_seconds", "group": "自动运行", "label": "检查间隔（秒）",
      "type": "number", "min": 10, "max": 600},
+    {"key": "auto_grace_minutes", "group": "自动运行", "label": "错过补跑宽限（分钟）",
+     "type": "number", "min": 0, "max": 720,
+     "help": "程序晚开时，超过这个时间就不再补跑当天；0 = 过点就不补"},
 
     # ── 接收 ──
     {"key": "inbox_auto_poll", "group": "接收", "label": "自动轮询私聊",
