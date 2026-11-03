@@ -44,6 +44,7 @@ import inbox as inbox_mod  # noqa: E402
 import leads as leads_mod  # noqa: E402
 import media as media_mod  # noqa: E402
 import planner  # noqa: E402
+import report as report_mod  # noqa: E402
 import scheduler  # noqa: E402
 from sender import SendEngine, find_wechat_window  # noqa: E402
 
@@ -145,8 +146,13 @@ def _safe(name: str) -> str:
 
 
 def _send_one(engine, display: str, wxid, text: str, shot_dir: str,
-              tag: str, pair: dict, kind_label: str = "") -> bool:
-    """发一条并记账。返回 True 表示应该继续，False 表示被取消（应终止）。"""
+              pair: dict, kind: str = "main",
+              kind_label: str = "") -> bool:
+    """发一条并记账（同时写投放日志）。
+
+    返回 True 表示应该继续，False 表示被取消（应终止）。
+    ``kind`` 区分 main/hook，供周报统计投放量。
+    """
     shot_path = os.path.join(
         shot_dir, time.strftime("%Y%m%d"),
         "r%02d_%s_%s.png" % (pair.get("index") or 1, time.strftime("%H%M%S"),
@@ -159,7 +165,15 @@ def _send_one(engine, display: str, wxid, text: str, shot_dir: str,
     if res.get("cancelled"):
         RT.log("WARN", "已停止：中断于 %s" % display)
         return False
-    if res.get("ok"):
+
+    ok = bool(res.get("ok"))
+    # 投放日志：周报要靠它算「单群 7 条主文案 / 2-3 条钩子」的达成率
+    try:
+        report_mod.log_delivery(DATA_DIR, display, kind, ok)
+    except Exception:
+        pass
+
+    if ok:
         RT.progress["sent"] += 1
         t = "已校验" if res.get("verified") or res.get("media_verified") else "未回读"
         extra = ""
@@ -216,9 +230,11 @@ def _run_events(engine, plan: dict) -> None:
             "media_first": True,
         }
         wxid = (plan.get("username_of") or {}).get(ev.get("target") or "")
-        label = {"main": "[主文案]", "hook": "[钩子]"}.get(ev.get("kind") or "", "")
+        kind = ev.get("kind") or "main"
+        label = {"main": "[主文案]", "hook": "[钩子]"}.get(kind, "")
         if not _send_one(engine, ev.get("target") or "", wxid,
-                         ev.get("text") or "", SHOT_DIR, label, pair):
+                         ev.get("text") or "", SHOT_DIR, pair,
+                         kind=kind, kind_label=label):
             break
         # 计时用的进度
         RT.progress["round"] = 1
@@ -289,7 +305,7 @@ def _run_plan(plan: dict) -> None:
             wxid = pair.get("username")
             text = pair.get("text")
             pair = dict(pair, index=rnd["index"])
-            if not _send_one(engine, display, wxid, text, SHOT_DIR, "", pair):
+            if not _send_one(engine, display, wxid, text, SHOT_DIR, pair):
                 break
             time.sleep(1.2)
 
@@ -388,6 +404,9 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/schedule":
                 # 读取当前调度配置
                 return self._json({"ok": True, **schedule_config()})
+            if p == "/api/report":
+                # 周报：投放量 + 线索量 + 6 项 KPI + 砍群建议
+                return self._json({"ok": True, **report_mod.weekly_report(DATA_DIR)})
             if p == "/api/inbox":
                 # 接收状态：各会话游标 + 本周线索概览
                 st = inbox_mod.load_state(DATA_DIR)

@@ -30,6 +30,7 @@ data/leads.json
 data/leads.csv
 data/inbox_state.json
 data/schedule_state.json
+data/delivery_log.jsonl
 
 # --- Electron / Chromium 运行期数据 ---
 runtime/
