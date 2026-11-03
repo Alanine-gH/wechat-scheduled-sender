@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 import campaign as _campaign
 import scheduler as _scheduler
+import targets as _targets
 
 DEFAULT_ROUNDS = 1          # 轮数：默认 1 轮
 DEFAULT_PER_ROUND = 0       # 每轮条数：0 = 跟随已选目标数（每个目标恰好 1 条）
@@ -246,6 +247,12 @@ def build_campaign_plan(targets: List[str],
     day = day or (now or _dt.datetime.now()).date()
     media_by_target = media_by_target or {}
 
+    # 先按「暂停 / 降频」过滤：这类目标今天根本不该发，
+# 放在上限过滤之前，省得把额度浪费在已经不投的群上
+    mode_skipped: Dict[str, str] = {}
+    if data_dir:
+        targets, mode_skipped = _targets.filter_targets(data_dir, targets, day)
+
     # 频次过滤：达到本周/本日上限的群本轮跳过
     skipped: List[str] = []
     skip_detail: Dict[str, str] = {}
@@ -314,6 +321,7 @@ def build_campaign_plan(targets: List[str],
         "target_count": len(targets),
         "skipped_by_cap": skipped,
         "skipped_detail": skip_detail,
+        "skipped_by_mode": mode_skipped,
         "weekly_cap": weekly_cap,
         "daily_cap": daily_cap,
         "run_cap": run_cap,

@@ -53,6 +53,7 @@ import planner  # noqa: E402
 import report as report_mod  # noqa: E402
 import scheduler  # noqa: E402
 import settings as settings_mod  # noqa: E402
+import targets as targets_mod  # noqa: E402
 from sender import SendEngine, find_wechat_window  # noqa: E402
 
 ROOT = userdata.data_root()
@@ -760,6 +761,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True,
                                    "backups": backup_mod.list_backups(DATA_DIR),
                                    "files": list(backup_mod.BACKUP_FILES)})
+            if p == "/api/targets":
+                # 目标投放状态（暂停/降频），以及报告给出的砍群建议
+                return self._json({
+                    "ok": True,
+                    "targets": targets_mod.describe(DATA_DIR),
+                    "modes": [{"key": m, "cn": targets_mod.MODE_CN[m]}
+                              for m in targets_mod.MODES],
+                    "cut_candidates": report_mod.weekly_report(
+                        DATA_DIR).get("cut_candidates") or [],
+                })
             if p == "/api/report":
                 # 周报：投放量 + 线索量 + 6 项 KPI + 砍群建议
                 return self._json({"ok": True, **report_mod.weekly_report(DATA_DIR)})
@@ -918,6 +929,13 @@ class Handler(BaseHTTPRequestHandler):
                             "今天是%s，不在允许投放的星期（%s）里"
                             % (plan.get("weekday_cn"),
                                "、".join(run_days)))
+                    # 目标全被「暂停/降频」过滤掉时也要说清原因，
+                    # 否则用户看到「计划为空」只会以为程序坏了
+                    if not plan.get("events") and plan.get("skipped_by_mode"):
+                        plan["blocked_reason"] = (
+                            "目标都被暂停或降频跳过了："
+                            + "；".join("%s（%s）" % (k, v) for k, v
+                                       in list(plan["skipped_by_mode"].items())[:4]))
                     plan["media"] = media_mod.describe(media_items) if media_items else None
                     plan["campaign_file"] = camp_path
                     plan["guard"] = guard_hits
@@ -1016,6 +1034,32 @@ class Handler(BaseHTTPRequestHandler):
                                        "error": "任务执行中，请先停止再恢复"}, 409)
                 r = backup_mod.import_(DATA_DIR, path)
                 return self._json(r, 200 if r.get("ok") else 400)
+
+            if p == "/api/targets/state":
+                # 设置目标投放状态：active / reduced / paused
+                body = body or {}
+                names = body.get("targets") or []
+                if isinstance(names, str):
+                    names = [names]
+                mode = str(body.get("mode") or "")
+                if mode not in targets_mod.MODES:
+                    return self._json({"ok": False,
+                                       "error": "mode 必须是 active/reduced/paused"}, 400)
+                n = targets_mod.set_mode(DATA_DIR, names, mode,
+                                         str(body.get("reason") or ""))
+                return self._json({"ok": True, "changed": n,
+                                   "targets": targets_mod.describe(DATA_DIR)})
+
+            if p == "/api/targets/apply-cuts":
+                # 把报告的砍群建议一键落成状态（默认降频，不直接暂停）
+                body = body or {}
+                mode = str(body.get("mode") or targets_mod.MODE_REDUCED)
+                if mode not in targets_mod.MODES:
+                    return self._json({"ok": False, "error": "mode 非法"}, 400)
+                cands = report_mod.weekly_report(DATA_DIR).get("cut_candidates") or []
+                n = targets_mod.apply_cut_candidates(DATA_DIR, cands, mode)
+                return self._json({"ok": True, "applied": n,
+                                   "targets": targets_mod.describe(DATA_DIR)})
 
             if p == "/api/failures/retry":
                 # 一键补发

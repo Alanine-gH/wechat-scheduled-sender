@@ -401,6 +401,16 @@
       <div id="reportTip" class="note" style="display:none;margin-top:10px"></div>
 
       <div class="preview" id="leadsBox" style="display:none;margin-top:12px"></div>
+
+      <h3 style="margin:16px 0 6px;font-size:13px">群管理（降频 / 退出）</h3>
+      <p class="hint" style="margin-top:0">方案要求「连续两周主动私聊 &lt;3 人的群降频或退出」。
+        这里可以把周报的建议一键落成状态：<b>降频</b>=隔天发，<b>暂停</b>=完全不发。</p>
+      <div class="row" style="margin-bottom:10px">
+        <button class="btn" id="reloadTargets" type="button">刷新</button>
+        <button class="btn" id="applyCuts" type="button">把砍群建议落为「降频」</button>
+        <span class="pill" id="targetMsg">–</span>
+      </div>
+      <div class="preview" id="targetBox" style="display:none"></div>
     </section>
 
     <section class="card rise full" style="animation-delay:.26s">
@@ -1201,6 +1211,61 @@ async function restoreBackup(path){
   }catch(e){ toast('恢复失败：'+e.message); }
 }
 
+/* ---------- 群管理（降频/暂停） ---------- */
+async function loadTargets(){
+  try{
+    const d = await api('/api/targets');
+    const items = d.targets || [];
+    const cuts = d.cut_candidates || [];
+    $('targetMsg').textContent =
+      `${items.length} 个有状态的目标 · 砍群建议 ${cuts.length} 个`;
+    const box = $('targetBox');
+    if(!items.length){
+      box.style.display = 'block';
+      box.innerHTML = '<div class="hlp" style="padding:12px;color:#9aa1b2">'
+        + '还没有设置任何降频/暂停。所有目标是正常投放。</div>';
+      return;
+    }
+    const opts = (d.modes||[]).map(m=>`<option value="${m.key}">${m.cn}</option>`).join('');
+    const rows = items.map(t=>{
+      const sel = `<select class="tgtMode" data-target="${escapeHtml(t.target)}"
+        style="width:130px">` + (d.modes||[]).map(m=>
+          `<option value="${m.key}" ${m.key===t.mode?'selected':''}>${m.cn}</option>`).join('')
+        + '</select>';
+      return `<tr><td>${escapeHtml(t.target)}</td><td>${sel}</td>
+        <td class="txt" style="color:#6b7280">${escapeHtml(t.reason||'')}</td>
+        <td style="white-space:nowrap">${escapeHtml(t.since_text||'')}</td></tr>`;
+    }).join('');
+    box.style.display = 'block';
+    box.innerHTML = `<table><thead><tr><th>目标</th><th>投放状态</th>
+      <th>原因</th><th>自</th></tr></thead><tbody>${rows}</tbody></table>`;
+    box.querySelectorAll('select.tgtMode').forEach(s=>{
+      s.addEventListener('change', ()=>setTargetMode(s.dataset.target, s.value));
+    });
+  }catch(e){ toast('读取群状态：'+e.message); }
+}
+
+async function setTargetMode(target, mode){
+  try{
+    await api('/api/targets/state', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({targets:[target], mode})});
+    toast(`${target} 已设为「${mode==='paused'?'暂停':mode==='reduced'?'降频':'正常'}」`);
+    await loadTargets();
+  }catch(e){ toast('设置失败：'+e.message); }
+}
+
+async function applyCuts(){
+  if(!confirm('把周报给出的砍群建议全部落为「降频（隔天发）」？\n\n之后可以逐个改成「暂停」或「正常」。')) return;
+  try{
+    const r = await api('/api/targets/apply-cuts', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({mode:'reduced'})});
+    toast(`已把 ${r.applied} 个群设为降频`);
+    await loadTargets();
+  }catch(e){ toast('操作失败：'+e.message); }
+}
+
 /* ---------- 生成计划 ---------- */
 async function genPlan(){
   const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
@@ -1484,6 +1549,10 @@ $('clearFails').addEventListener('click', clearFails);
 $('backupNow').addEventListener('click', backupNow);
 $('reloadBackups').addEventListener('click', loadBackups);
 
+/* 群管理 */
+$('reloadTargets').addEventListener('click', loadTargets);
+$('applyCuts').addEventListener('click', applyCuts);
+
 /* 自动运行 */
 $('reloadAuto').addEventListener('click', loadAuto);
 $('saveAutoTargets').addEventListener('click', saveAutoTargets);
@@ -1517,6 +1586,7 @@ async function loadPaths(){
     loadAuto().catch(()=>{});
     loadFails().catch(()=>{});
     loadBackups().catch(()=>{});
+    loadTargets().catch(()=>{});
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));
   }
