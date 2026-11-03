@@ -47,6 +47,7 @@ import media as media_mod  # noqa: E402
 import planner  # noqa: E402
 import report as report_mod  # noqa: E402
 import scheduler  # noqa: E402
+import settings as settings_mod  # noqa: E402
 from sender import SendEngine, find_wechat_window  # noqa: E402
 
 ROOT = userdata.data_root()
@@ -66,51 +67,50 @@ AUTH_TOKEN = ""   # 由 main() 注入
 
 def read_mode() -> str:
     """读取用户选择的解析模式（line / separator）。"""
-    try:
-        with open(SETTINGS_FILE, encoding="utf-8") as f:
-            m = (json.load(f) or {}).get("message_mode")
-        if m in (planner.MODE_LINE, planner.MODE_SEPARATOR):
-            return m
-    except Exception:
-        pass
+    m = settings_mod.get(DATA_DIR, "message_mode")
+    if m in (planner.MODE_LINE, planner.MODE_SEPARATOR):
+        return m
     return planner.MODE_LINE
 
 
 def read_settings() -> dict:
-    try:
-        with open(SETTINGS_FILE, encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception:
-        return {}
+    """全部设置（已与默认值合并）。"""
+    return settings_mod.load(DATA_DIR)
 
 
 def schedule_config() -> Dict[str, Any]:
-    """调度配置：起始时刻 / 钩子延迟 / 每周上限 / 允许投放的星期。
-
-    没配过就用 scheduler 的默认值（方案给的：20:00、30 分钟、周二四六）。
-    """
-    s = read_settings()
+    """调度相关设置的投影，给前端与计划生成用。"""
+    s = settings_mod.load(DATA_DIR)
     return {
-        "start_at": s.get("start_at") or scheduler.DEFAULT_START_AT,
-        "hook_delay_minutes": float(s.get("hook_delay_minutes")
-                                    or scheduler.DEFAULT_HOOK_DELAY_MIN),
-        "weekly_cap": int(s.get("weekly_cap") or scheduler.DEFAULT_WEEKLY_CAP),
-        "hook_days": s.get("hook_days") or list(campaign_mod.DEFAULT_HOOK_DAYS),
-        "run_days": s.get("run_days") or [],
+        "start_at": s["start_at"],
+        "hook_delay_minutes": float(s["hook_delay_minutes"]),
+        "weekly_cap": int(s["weekly_cap"]),
+        "daily_cap": int(s["daily_cap"]),
+        "run_cap": int(s["run_cap"]),
+        "max_fail_streak": int(s["max_fail_streak"]),
+        "interval_min": float(s["interval_min"]),
+        "interval_max": float(s["interval_max"]),
+        "cooldown_every": int(s["cooldown_every"]),
+        "cooldown_seconds": int(s["cooldown_seconds"]),
+        "retry_times": int(s["retry_times"]),
+        "retry_delay_seconds": int(s["retry_delay_seconds"]),
+        "verify_timeout": int(s["verify_timeout"]),
+        "clear_input_before": bool(s["clear_input_before"]),
+        "auto_enabled": bool(s["auto_enabled"]),
+        "auto_check_seconds": int(s["auto_check_seconds"]),
+        "inbox_auto_poll": bool(s["inbox_auto_poll"]),
+        "inbox_poll_seconds": int(s["inbox_poll_seconds"]),
+        "hook_days": list(s["hook_days"]),
+        "run_days": list(s["run_days"]),
+        "enforce_window": bool(s["enforce_window"]),
+        "send_window_start": s["send_window_start"],
+        "send_window_end": s["send_window_end"],
     }
 
 
-def write_settings(**kw) -> None:
-    data = {}
-    try:
-        with open(SETTINGS_FILE, encoding="utf-8") as f:
-            data = json.load(f) or {}
-    except Exception:
-        data = {}
-    data.update(kw)
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def write_settings(**kw) -> Dict[str, Any]:
+    """保存设置，返回 ``{ok, saved, errors}``（校验失败的不写入）。"""
+    return settings_mod.save(DATA_DIR, kw)
 
 
 class Runtime:
@@ -415,6 +415,9 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/schedule":
                 # 读取当前调度配置
                 return self._json({"ok": True, **schedule_config()})
+            if p == "/api/settings":
+                # 全部设置：当前值 + 表单描述（分组）
+                return self._json({"ok": True, **settings_mod.describe(DATA_DIR)})
             if p == "/api/report":
                 # 周报：投放量 + 线索量 + 6 项 KPI + 砍群建议
                 return self._json({"ok": True, **report_mod.weekly_report(DATA_DIR)})
@@ -589,6 +592,24 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": False, "error": "缺少 text"}, 400)
                 return self._json({"ok": True, **guard_mod.check(text)})
 
+            if p == "/api/settings":
+                # 保存全部设置（逐项校验，非法值不写入）
+                body = body or {}
+                r = settings_mod.save(DATA_DIR, body)
+                if not r.get("ok"):
+                    return self._json({"ok": False, "error": "设置有非法值",
+                                       "errors": r.get("errors"),
+                                       "settings": r.get("settings")}, 400)
+                return self._json({"ok": True, "saved": r.get("saved"),
+                                   **settings_mod.describe(DATA_DIR)})
+
+            if p == "/api/settings/reset":
+                # 恢复默认值；body.keys 为空则全部恢复
+                body = body or {}
+                keys = body.get("keys")
+                settings_mod.reset(DATA_DIR, keys)
+                return self._json({"ok": True, **settings_mod.describe(DATA_DIR)})
+
             if p == "/api/media":
                 # 预览素材：只收集不发送，让用户确认选对了
                 spec = body.get("media") or body or {}
@@ -597,28 +618,22 @@ class Handler(BaseHTTPRequestHandler):
 
             if p == "/api/schedule":
                 body = body or {}
-                # 保存调度配置（只写认识的字段，避免脏数据）
-                patch: Dict[str, Any] = {}
-                if "start_at" in body:
-                    h, m = scheduler.parse_hhmm(body.get("start_at"))
-                    patch["start_at"] = "%02d:%02d" % (h, m)
-                if "hook_delay_minutes" in body:
-                    patch["hook_delay_minutes"] = max(
-                        0.0, float(body.get("hook_delay_minutes") or 0))
-                if "weekly_cap" in body:
-                    patch["weekly_cap"] = max(0, int(body.get("weekly_cap") or 0))
-                if "hook_days" in body:
-                    days = [str(d).lower() for d in (body.get("hook_days") or [])]
-                    patch["hook_days"] = [
-                        d for d in days if d in scheduler.WEEKDAY_KEYS]
-                if "run_days" in body:
-                    days = [str(d).lower() for d in (body.get("run_days") or [])]
-                    patch["run_days"] = [
-                        d for d in days if d in scheduler.WEEKDAY_KEYS]
-                if patch:
-                    write_settings(**patch)
-                cfg = schedule_config()
-                return self._json({"ok": True, **cfg})
+                # 只挑出调度相关字段，校验与写入交给 settings 模块
+                keys = ("start_at", "hook_delay_minutes", "weekly_cap", "daily_cap",
+                        "run_cap", "max_fail_streak", "interval_min", "interval_max",
+                        "cooldown_every", "cooldown_seconds", "retry_times",
+                        "retry_delay_seconds", "verify_timeout", "clear_input_before",
+                        "auto_enabled", "auto_check_seconds", "inbox_auto_poll",
+                        "inbox_poll_seconds", "hook_days", "run_days",
+                        "enforce_window", "send_window_start", "send_window_end",
+                        "log_keep_days", "shot_keep_days",
+                        "keywords_need", "keywords_hook")
+                patch = {k: body[k] for k in keys if k in body}
+                r = write_settings(**patch) if patch else {"ok": True, "errors": {}}
+                if not r.get("ok"):
+                    return self._json({"ok": False, "error": "设置有非法值",
+                                       "errors": r.get("errors")}, 400)
+                return self._json({"ok": True, **schedule_config()})
 
             if p == "/api/schedule/reset":
                 # 清空本周投放计数（比如手动重跑当天）
