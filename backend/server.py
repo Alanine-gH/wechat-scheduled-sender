@@ -40,6 +40,7 @@ userdata.configure(os.environ.get("WCS_DATA_ROOT"))
 
 import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
+import inbox as inbox_mod  # noqa: E402
 import media as media_mod  # noqa: E402
 import planner  # noqa: E402
 import scheduler  # noqa: E402
@@ -386,6 +387,16 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/schedule":
                 # 读取当前调度配置
                 return self._json({"ok": True, **schedule_config()})
+            if p == "/api/inbox":
+                # 接收状态：各会话游标 + 本周线索概览
+                st = inbox_mod.load_state(DATA_DIR)
+                chats = st.get("chats") or {}
+                return self._json({
+                    "ok": True,
+                    "chats": len(chats),
+                    "detail": {v.get("name") or k: v.get("cursor")
+                               for k, v in chats.items()},
+                })
             if p.startswith("/shots/"):
                 rel = os.path.normpath(p[len("/shots/"):]).replace("..", "")
                 return self._file(os.path.join(SHOT_DIR, rel), "image/png")
@@ -543,6 +554,33 @@ class Handler(BaseHTTPRequestHandler):
                 (state.get("weekly") or {}).pop(wk, None)
                 scheduler.save_state(DATA_DIR, state)
                 return self._json({"ok": True, "week": wk})
+
+            if p == "/api/inbox/poll":
+                # 轮询私聊新消息（读库，不注入进程）
+                body = body or {}
+                r = inbox_mod.poll_new(
+                    account=body.get("account"),
+                    data_dir=DATA_DIR,
+                    include_history=bool(body.get("include_history")),
+                )
+                if r.get("error"):
+                    return self._json({"ok": False, "error": r["error"]}, 500)
+                items = r.get("items") or []
+                # 命中的线索追加进线索表（leads 模块，任务 5）
+                # 惰性导入：线索模块缺失时接收功能本身仍可用
+                try:
+                    import leads as leads_mod
+                    r["added"] = leads_mod.add_items(items, DATA_DIR)
+                except ImportError:
+                    r["added"] = 0
+                except Exception as exc:
+                    r["leads_error"] = str(exc)
+                r.pop("state", None)
+                return self._json({"ok": True, **r})
+
+            if p == "/api/inbox/reset":
+                n = inbox_mod.reset_cursors(DATA_DIR)
+                return self._json({"ok": True, "cleared": n})
 
             if p == "/api/start":
                 if RT.running:
