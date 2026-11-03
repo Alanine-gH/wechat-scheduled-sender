@@ -19,9 +19,15 @@ logs/
 # 注意：data/messages.txt 是消息池，属于使用者自己的内容，默认不提交；
 #      仓库里放 data/messages.example.txt 作为模板。
 data/messages.txt
+# campaign.txt 是内容编排，正文里含使用者的真实联系方式（电话/微信号），
+# 同样属于使用者自己的内容，绝不提交；仓库里放 campaign.example.txt 作模板。
+data/campaign.txt
 data/settings.json
 data/media/
 data/recall/
+# 接收到的私聊线索、关键词命中记录（含真实昵称与会话内容）
+data/leads.json
+data/inbox_state.json
 
 # --- Electron / Chromium 运行期数据 ---
 runtime/
