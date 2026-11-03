@@ -33,6 +33,8 @@ WECHAT_MAIN_CLASS = "Qt51514QWindowIcon"
 # 所以窗口匹配不能认死一个类名，改为「类名含 QWindowIcon」+ 标题含微信 + 尺寸够大。
 WECHAT_CLASS_HINT = "QWindowIcon"
 WECHAT_TITLE_HINTS = ("微信", "Weixin", "WeChat")
+# 主窗口最小边长。窗口被拖小是常态（实测见过 296x388），门槛定高了会「找不到微信」。
+MIN_WINDOW_SIDE = 200
 PW_RENDERFULLCONTENT = 0x00000002
 
 
@@ -128,7 +130,9 @@ def find_wechat_window(restore: bool = True) -> Optional[int]:
                     pass
                 w, h = _size(hwnd)
 
-            if w < 300 or h < 300:
+            # 门槛不能定太高：窗口被拖小是常态（实测见过 296x388），
+            # 只要是个能用的窗口就收进来，最后再挑最大的那个。
+            if w < MIN_WINDOW_SIDE or h < MIN_WINDOW_SIDE:
                 return True
             found.append((hwnd, w * h))
         except Exception:
@@ -646,6 +650,26 @@ class SendEngine:
             chats.append((nm.split("\n")[0].strip(), it))
         return chats, has_network
 
+    def _already_in_chat(self, kw: str, display: Optional[str]) -> bool:
+        """当前是否已经就在目标会话里。
+
+        为什么要单独判：**对「已经是当前会话」的列表项再点一次，微信不会
+        切回去**（实测点完校验反而失败）。连续给同一个群发多条时就会踩到，
+        所以先认一下，已经在就直接算打开成功。
+        """
+        cur = self.current_chat_name()
+        if not cur:
+            return False
+        names = [n for n in (display, kw) if n]
+        cn = normalize_name(cur)
+        for n in names:
+            if n in cur or cur in n:
+                return True
+            nn = normalize_name(n)
+            if nn and cn and (nn == cn or (len(nn) >= 4 and (nn in cn or cn in nn))):
+                return True
+        return False
+
     def open_chat(self, target: str, display: Optional[str] = None,
                   timeout: float = 12.0) -> bool:
         """打开会话。
@@ -671,6 +695,11 @@ class SendEngine:
         if self.cancelled():
             self.last_open_error = "已取消"
             return False
+
+        # 已经就在这个会话里就别再点了（再点反而切不过去，见 _already_in_chat）
+        if self._already_in_chat(kw, display):
+            self.last_open_error = None
+            return True
 
         # 1) 会话列表里直接命中（唯一可靠路径，见下方说明）
         clicked = self._click_session_item(kw)
@@ -916,6 +945,56 @@ class SendEngine:
         except Exception:
             return False
 
+    def clear_input(self) -> None:
+        """清空输入框。
+
+        发送前必须清：上一轮如果中途失败，输入框可能残留文字或素材预览，
+        不清就会和这一条混在一起发出去（实测「纯图片」被上一轮的文件残留
+        干扰，判成功失败）。
+        """
+        try:
+            f = self._input_field()
+            if f is None:
+                return
+            f.SetFocus()
+            time.sleep(0.2)
+            f.SendKeys("{Ctrl}a", waitTime=0.05)
+            f.SendKeys("{Delete}", waitTime=0.05)
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+    def verify_media_in_db(self, username: Optional[str], kind: str = "image",
+                           timeout: float = 10.0) -> bool:
+        """回读数据库，确认最近一条是图片/文件。
+
+        纯素材发送没有文字可回读，只能按类型判断：发送后最近一条消息
+        如果是「图片」或「文件/链接/卡片」，就认为发出去了。
+        """
+        if not username:
+            return False
+        try:
+            import contacts as C
+            db = C.get_db(None)
+        except Exception:
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                msgs = db.get_messages(username, limit=3)
+            except Exception:
+                msgs = []
+            for m in msgs or []:
+                t = (m.get("type") or "")
+                if kind == "image" and "图片" in t:
+                    return True
+                if kind != "image" and ("文件" in t or "卡片" in t or "链接" in t):
+                    return True
+            if self.cancelled():
+                return False
+            time.sleep(1.0)
+        return False
+
     def input_is_empty(self) -> bool:
         """检查输入框是否已清空（发送成功的强信号）。"""
         try:
@@ -953,13 +1032,98 @@ class SendEngine:
             time.sleep(1.0)
         return False
 
+    def send_media(self, path: str, kind: Optional[str] = None) -> bool:
+        """把图片或文件发到**当前已打开**的会话。
+
+        机制：放进剪贴板 -> 输入框 Ctrl+V -> 点「发送」。
+        为什么不用「发送文件」按钮：那会弹系统文件对话框，要多层 UIA 操作；
+        而剪贴板粘贴是纯语义路径，实测图片/文件都能发出去并落库
+        （图片落库 type=图片，文件落库 type=文件/链接/卡片）。
+
+        注意：微信输入区工具栏**没有「发送图片」入口**，图片只能粘贴或拖拽，
+        拖拽需要精确坐标（本项目的红线），所以剪贴板是唯一可行路径。
+        """
+        if self.cancelled():
+            return False
+        try:
+            import clipboard as CB
+        except Exception:
+            return False
+
+        if not path or not os.path.isfile(path):
+            return False
+
+        if kind is None:
+            try:
+                import media as MD
+                kind = MD.classify(path)
+            except Exception:
+                kind = "image" if path.lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")) else "file"
+
+        field = self._input_field()
+        if field is None:
+            return False
+
+        # 1) 放进剪贴板
+        ok = CB.set_image(path) if kind == "image" else CB.set_files([path])
+        if not ok:
+            return False
+
+        # 2) 聚焦输入框 + 粘贴
+        try:
+            field.SetFocus()
+            time.sleep(0.3)
+            field.SendKeys("{Ctrl}v", waitTime=0.1)
+        except Exception:
+            CB.clear()
+            return False
+
+        # 3) 等微信渲染预览。发送按钮只在输入框有内容时才渲染，
+        #    所以「按钮出现」就是粘贴成功的直接证据。
+        deadline = time.time() + 8.0
+        btn = None
+        while time.time() < deadline:
+            if self.cancelled():
+                CB.clear()
+                return False
+            btn = self._send_button()
+            if btn is not None:
+                break
+            time.sleep(0.5)
+        if btn is None:
+            CB.clear()
+            return False
+
+        # 4) 点发送
+        try:
+            btn.Click()
+        except Exception:
+            try:
+                btn.GetInvokePattern().Invoke()
+            except Exception:
+                CB.clear()
+                return False
+        time.sleep(1.5)
+        # 清掉剪贴板，避免下一条误粘贴同一张图
+        CB.clear()
+        return True
+
     def send_to(self, target: str, text: str, display: Optional[str] = None,
                 username: Optional[str] = None,
                 shot_path: Optional[str] = None,
-                verify: bool = True) -> Dict[str, Any]:
-        """打开会话 -> 校验目标 -> 发送 -> 回读校验 -> 截图。
+                verify: bool = True,
+                media_path: Optional[str] = None,
+                media_kind: Optional[str] = None,
+                media_first: bool = True) -> Dict[str, Any]:
+        """打开会话 -> 校验目标 -> 发送（可选先/后发素材）-> 回读校验 -> 截图。
 
         判定成功的条件：打开成功 + 已触发发送 + (输入框已清空 或 回读命中)
+
+        media_path 非空时会额外发一条图片/文件：
+          * media_first=True  —— 先发素材再发文字（更像"配图说明"）
+          * media_first=False —— 先发文字再发素材
+          * text 为空时只发素材。
         """
         res: Dict[str, Any] = {"target": display or target, "ok": False}
         try:
@@ -984,28 +1148,96 @@ class SendEngine:
                 res["cancelled"] = True
                 return res
 
-            triggered = self.send_text(text)
-            if not triggered:
+            has_text = bool((text or "").strip())
+            has_media = bool(media_path)
+
+            # 发送前先清空输入框，避免上一轮的残留混进来。
+            # 清完要等一下并确认真的空了 —— 微信清空是异步的，
+            # 立刻粘贴会和残留混在一起（纯素材发送就踩过这个坑）。
+            self.clear_input()
+            for _ in range(6):
+                if self.input_is_empty():
+                    break
+                time.sleep(0.4)
+
+            def _do_media() -> bool:
+                if not has_media:
+                    return True
+                if self.cancelled():
+                    return False
+                return self.send_media(media_path, media_kind)
+
+            def _do_text() -> bool:
+                if not has_text:
+                    return True
+                if self.cancelled():
+                    return False
+                return self.send_text(text)
+
+            if media_first:
+                media_ok = _do_media()
+                if has_media:
+                    res["media"] = media_ok
+                if has_media and not media_ok:
+                    res["error"] = "发送素材失败（%s）" % os.path.basename(media_path or "")
+                    return res
+                if has_text:
+                    time.sleep(1.0)      # 素材和文字之间留点间隔，避免挤在一起
+                text_ok = _do_text()
+            else:
+                text_ok = _do_text()
+                if has_text:
+                    time.sleep(1.0)
+                media_ok = _do_media()
+                if has_media:
+                    res["media"] = media_ok
+                if has_media and not media_ok:
+                    res["error"] = "发送素材失败（%s）" % os.path.basename(media_path or "")
+                    return res
+
+            if not text_ok:
                 res["error"] = "写入输入框或触发发送失败"
                 return res
 
-            time.sleep(0.8)
-            cleared = self.input_is_empty()
+            # 等输入框被清空（最多 8 秒轮询）。
+            # 微信发图片/文件后清空输入区需要一点时间，实测约 3~5 秒；
+            # 固定 sleep 太短会把成功判成失败（「纯图片」就踩过这个坑）。
+            cleared = False
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                if self.input_is_empty():
+                    cleared = True
+                    break
+                if self.cancelled():
+                    break
+                time.sleep(0.6)
             res["cleared"] = cleared
+            res["btn_gone"] = self._send_button() is None
 
             verified = False
             # 回读校验也要能被取消叫停（它最长等 8 秒）
-            if verify and username and not self.cancelled():
-                verified = self.verify_in_db(username, text)
+            if verify and username and not self.cancelled() and (text or "").strip():
+                verified = self.verify_in_db(username, text or "")
             res["verified"] = verified
+
+            # 纯素材发送没有文字可回读，按「最近一条是不是图片/文件」判断。
+            # 这是纯素材唯一可靠的落地证据（输入框清空也可能是残留被清掉）。
+            media_verified = False
+            if has_media and not has_text and username and not self.cancelled():
+                media_verified = self.verify_media_in_db(
+                    username, media_kind or "image", timeout=8.0)
+            res["media_verified"] = media_verified
 
             if shot_path:
                 res["shot"] = shot_path if capture_window(self.hwnd, shot_path) else None
 
-            if cleared or verified:
+            # 输入框已清空 = 微信把内容发走了（文字/图片/文件都适用）
+            if cleared or verified or media_verified:
                 res["ok"] = True
-            else:
+            elif has_text:
                 res["error"] = "已触发发送，但输入框仍有内容且数据库未回读（可能发送失败）"
+            else:
+                res["error"] = "素材已触发发送，但输入区仍有内容（可能没发出去）"
             return res
         except Exception as exc:
             res["error"] = str(exc)

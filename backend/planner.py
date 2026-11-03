@@ -116,6 +116,8 @@ def build_plan(
     per_round: int = DEFAULT_PER_ROUND,
     interval_min: float = DEFAULT_INTERVAL_MIN,
     interval_max: float = DEFAULT_INTERVAL_MAX,
+    media_by_target: Optional[Dict[str, List[str]]] = None,
+    media_first: bool = True,
 ) -> Dict[str, Any]:
     """生成当日发送计划。
 
@@ -124,6 +126,10 @@ def build_plan(
 
     每轮从 messages 里随机抽 per_round 条（不足则循环取），
     再轮转分配给 targets；轮间隔用日期种子随机生成，当天可复现。
+
+    ``media_by_target``：{目标名: [素材路径, ...]}。每条消息按目标取一条素材，
+    第 r 轮取 pool[(r-1) % len(pool)]，这样多轮时素材会轮换。
+    ``media_first`` 决定素材与文字的先后。
     """
     seed_date = seed_date or _dt.date.today().isoformat()
     rng = random.Random(seed_date)  # 种子 = 日期，稳定可复现
@@ -132,6 +138,7 @@ def build_plan(
     if per_round <= 0:
         per_round = max(1, len(targets))
     rounds = max(1, int(rounds or 1))
+    media_by_target = media_by_target or {}
 
     # 间隔是「相邻两次发送之间」的等待时间（不是轮与轮之间）：
     # 30 个群 × 约 5 分钟 ≈ 150 分钟 ≈ 2.5 小时，符合原始需求。
@@ -140,7 +147,12 @@ def build_plan(
     plan_rounds: List[PlanRound] = []
     for r in range(rounds):
         if not messages:
-            picked: List[str] = []
+            # 消息池为空时不能直接产出 0 条 —— 否则「只发素材」模式发不出去。
+            # 有素材就按 per_round 补齐空文字占位，真正的内容由 media_path 承担。
+            if media_by_target and per_round > 0:
+                picked = [""] * per_round
+            else:
+                picked = []
         elif len(messages) >= per_round:
             picked = rng.sample(messages, per_round)
         else:
@@ -152,6 +164,7 @@ def build_plan(
     assignments: List[Dict[str, Any]] = []
     tcount = max(1, len(targets))
     first_send = True
+    media_count = 0
     for pr in plan_rounds:
         rng2 = random.Random("%s|%d" % (seed_date, pr.index))
         start = rng2.randrange(tcount)
@@ -163,9 +176,16 @@ def build_plan(
                 first_send = False
             else:
                 wait = delay_rng.uniform(interval_min, interval_max) * 60.0
+            pool = media_by_target.get(tgt) or []
+            media_path = ""
+            if pool:
+                media_path = pool[(pr.index - 1) % len(pool)]
+                media_count += 1
             pairs.append({
                 "target": tgt,
                 "text": msg,
+                "media_path": media_path,
+                "media_first": bool(media_first),
                 "delay_seconds": round(wait, 2),
             })
         pr.delay_seconds = sum(p["delay_seconds"] for p in pairs)
@@ -182,6 +202,7 @@ def build_plan(
         "target_count": len(targets),
         "message_pool": len(messages),
         "total_messages": total,
+        "media_count": media_count,
         "estimated_seconds": round(total_seconds, 1),
         "estimated_minutes": round(total_seconds / 60.0, 1),
         "round_plans": [pr.to_dict() for pr in plan_rounds],

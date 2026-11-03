@@ -16,7 +16,7 @@
  *    避免固定端口被占用。
  */
 
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -180,6 +180,30 @@ function log(line) {
 let pyChild = null;
 let win = null;
 
+// 素材选择：渲染进程拿不到文件绝对路径（<input type=file> 只给文件名），
+// 所以由主进程弹系统对话框，把真实路径回传给界面。
+function registerIpc() {
+  ipcMain.handle('wcs:pick-files', async () => {
+    if (!win) return [];
+    try {
+      const r = await dialog.showOpenDialog(win, {
+        title: '选择要发送的图片或文件',
+        properties: ['openFile', 'multiSelections'],
+        filters: [
+          { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'] },
+          { name: '文档与压缩包', extensions: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+                                                'txt', 'md', 'csv', 'json', 'zip', 'rar', '7z'] },
+          { name: '全部文件', extensions: ['*'] },
+        ],
+      });
+      if (r.canceled) return [];
+      return r.filePaths || [];
+    } catch (e) {
+      return [];
+    }
+  });
+}
+
 function createWindow(port) {
   win = new BrowserWindow({
     width: 1280,
@@ -282,8 +306,7 @@ async function boot() {
       });
 
       createWindow(port);
-      return;
-    } catch (err) {
+      return;    } catch (err) {
       lastErr = err;
       log('该 Python 不可用: ' + err.message);
     }
@@ -300,7 +323,10 @@ async function boot() {
   app.quit();
 }
 
-app.whenReady().then(boot);
+app.whenReady().then(() => {
+  registerIpc();
+  boot();
+});
 
 app.on('window-all-closed', () => {
   stopPython();

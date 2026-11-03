@@ -209,6 +209,68 @@
       <div class="note" id="modeTip" style="display:none"></div>
     </section>
 
+    <section class="card rise" style="animation-delay:.125s">
+      <h2>2.5 · 素材（图片 / 文件）</h2>
+      <p class="hint">不填就只发文字。素材通过<b>剪贴板粘贴</b>送进微信输入框——
+        微信工具栏没有「发送图片」入口，这是唯一不依赖鼠标坐标的路径。</p>
+
+      <div class="seg" id="mediaSourceSeg">
+        <button class="seg-item" data-src="folder" type="button">
+          文件夹轮转<small>扫目录，按目标轮流取</small>
+        </button>
+        <button class="seg-item" data-src="list" type="button">
+          路径列表<small>txt 里每行一个路径</small>
+        </button>
+        <button class="seg-item" data-src="picked" type="button">
+          手动选文件<small>点下面的按钮挑文件</small>
+        </button>
+        <button class="seg-item active" data-src="none" type="button">
+          不发送素材<small>只发文字</small>
+        </button>
+      </div>
+
+      <div id="mediaFolderRow" style="display:none;margin-top:10px">
+        <label class="lbl">素材文件夹</label>
+        <input id="mediaFolder" type="text" placeholder="例如 D:\素材\图片">
+        <label class="chk" style="margin-top:8px">
+          <input type="checkbox" id="mediaOnlyImages" checked>
+          <span>只发图片（取消勾选则目录里允许的文件都会发）</span>
+        </label>
+      </div>
+
+      <div id="mediaListRow" style="display:none;margin-top:10px">
+        <label class="lbl">路径列表文件（每行一个绝对路径）</label>
+        <input id="mediaListFile" type="text" placeholder="例如 D:\素材\paths.txt">
+      </div>
+
+      <div id="mediaPickedRow" style="display:none;margin-top:10px">
+        <label class="lbl">已选文件</label>
+        <div id="mediaPickedList" class="note" style="display:block">还没有选文件</div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn" id="pickFiles" type="button">选择文件…</button>
+          <button class="btn" id="clearFiles" type="button">清空</button>
+        </div>
+        <input id="mediaFileInput" type="file" multiple style="display:none">
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <label class="lbl" style="margin:0">素材与文字顺序</label>
+        <select id="mediaFirst">
+          <option value="1" selected>先发素材，再发文字</option>
+          <option value="0">先发文字，再发素材</option>
+        </select>
+        <label class="lbl" style="margin:0 0 0 12px">分配方式</label>
+        <select id="mediaAssign">
+          <option value="rotate" selected>轮流取（每个目标不同）</option>
+          <option value="shuffle">打乱后轮流（当天可复现）</option>
+          <option value="same">每个目标都发全部</option>
+        </select>
+        <button class="btn" id="previewMedia" type="button">预览素材</button>
+        <span class="pill" id="mediaCount">–</span>
+      </div>
+      <div class="note" id="mediaTip" style="display:none"></div>
+    </section>
+
     <section class="card rise" style="animation-delay:.15s">
       <h2>3 · 计划参数</h2>
       <p class="hint">随机种子固定为当天日期，同一天的计划可复现。
@@ -270,7 +332,8 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let state = { groups: [], friends: [], selected: new Map(), plan: null, polling: null };
+let state = { groups: [], friends: [], selected: new Map(), plan: null, polling: null,
+  mediaSource: 'none', mediaPaths: [] };
 
 /* Electron 模式由 preload 注入 __WCS__（含服务端口与 token）；
    浏览器模式（python backend/server.py）下 __WCS__ 不存在，走同源 + 不校验。 */
@@ -463,6 +526,82 @@ async function saveMessages(){
 }
 
 /* ---------- 计划 ---------- */
+/* ---------- 素材 ---------- */
+function mediaSpec(){
+  const src = state.mediaSource;
+  if(!src || src === 'none') return null;
+  const spec = {
+    source: src,
+    media_first: $('mediaFirst').value === '1',
+    assign_mode: $('mediaAssign').value
+  };
+  if(src === 'folder'){
+    spec.folder = $('mediaFolder').value.trim();
+    spec.only_images = $('mediaOnlyImages').checked;
+  }else if(src === 'list'){
+    spec.list_file = $('mediaListFile').value.trim();
+  }else if(src === 'picked'){
+    spec.paths = state.mediaPaths.slice();
+  }
+  return spec;
+}
+
+function renderPicked(){
+  const box = $('mediaPickedList');
+  const list = state.mediaPaths;
+  if(!list.length){
+    box.textContent = '还没有选文件';
+    return;
+  }
+  box.innerHTML = list.map((p,i)=>{
+    const name = p.split(/[\\/]/).pop();
+    return `<div style="display:flex;gap:8px;align-items:center;padding:3px 0">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(name)}</span>
+      <a href="#" data-rm="${i}" style="color:#dc2626;text-decoration:none">移除</a>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('a[data-rm]').forEach(a=>{
+    a.addEventListener('click', ev=>{
+      ev.preventDefault();
+      state.mediaPaths.splice(+a.dataset.rm, 1);
+      renderPicked();
+    });
+  });
+}
+
+async function previewMedia(){
+  const spec = mediaSpec();
+  if(!spec) return toast('当前是「不发送素材」');
+  try{
+    const r = await api('/api/media', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({media: spec})});
+    const m = r.media || {};
+    $('mediaCount').textContent = `${m.count||0} 个（图片 ${m.images||0} / 文件 ${m.files||0}）`;
+    const tip = $('mediaTip');
+    tip.style.display = 'block';
+    if(!m.count){
+      tip.textContent = '没找到可用素材。检查路径是否正确，或扩展名是否被允许（exe/bat 等可执行文件不支持）。';
+      return;
+    }
+    const mb = ((m.total_bytes||0)/1048576).toFixed(2);
+    tip.textContent = `共 ${m.count} 个，合计 ${mb} MB。前几个：`
+      + (m.preview||[]).map(x=>x.name).join('、');
+  }catch(e){
+    toast('预览素材失败：'+e.message);
+  }
+}
+
+function setMediaSource(src){
+  state.mediaSource = src;
+  document.querySelectorAll('#mediaSourceSeg .seg-item').forEach(b=>{
+    b.classList.toggle('active', b.dataset.src === src);
+  });
+  $('mediaFolderRow').style.display = src === 'folder' ? 'block' : 'none';
+  $('mediaListRow').style.display = src === 'list' ? 'block' : 'none';
+  $('mediaPickedRow').style.display = src === 'picked' ? 'block' : 'none';
+}
+
+/* ---------- 生成计划 ---------- */
 async function genPlan(){
   const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
   if(!targets.length) return toast('请先选择至少一个目标');
@@ -470,7 +609,8 @@ async function genPlan(){
     targets: targets.map(t=>t.name),
     rounds: +$('rounds').value, per_round: +$('perRound').value,
     interval_min: +$('iMin').value, interval_max: +$('iMax').value,
-    account: $('accountSel').value
+    account: $('accountSel').value,
+    media: mediaSpec()
   };
   try{
     const r = await api('/api/plan', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -602,6 +742,35 @@ function previewCount(){
 $('genPlan').addEventListener('click', genPlan);
 $('startBtn').addEventListener('click', start);
 $('stopBtn').addEventListener('click', stop);
+
+/* 素材来源切换 */
+document.querySelectorAll('#mediaSourceSeg .seg-item').forEach(b=>{
+  b.addEventListener('click', ()=>setMediaSource(b.dataset.src));
+});
+$('previewMedia').addEventListener('click', previewMedia);
+$('pickFiles').addEventListener('click', ()=>$('mediaFileInput').click());
+$('clearFiles').addEventListener('click', ()=>{ state.mediaPaths = []; renderPicked(); });
+$('mediaFileInput').addEventListener('change', ev=>{
+  // 浏览器出于安全只给文件名，给不了绝对路径。
+  // Electron 模式下主进程会通过 preload 提供 showOpenDialog 的真实路径；
+  // 浏览器模式退化为「手动填文件夹」这条路。
+  const files = [...(ev.target.files||[])];
+  const real = (window.__WCS__ && window.__WCS__.pickFiles) ? null : null;
+  if(!files.length) return;
+  if(window.__WCS__ && typeof window.__WCS__.pickFiles === 'function'){
+    window.__WCS__.pickFiles().then(list=>{
+      if(list && list.length){
+        state.mediaPaths = list.slice();
+        renderPicked();
+        setMediaSource('picked');
+      }
+    }).catch(()=>{});
+    return;
+  }
+  toast('浏览器模式拿不到文件绝对路径，请改用「文件夹轮转」或「路径列表」');
+});
+renderPicked();
+setMediaSource('none');
 
 /* ---------- 启动 ---------- */
 async function loadPaths(){

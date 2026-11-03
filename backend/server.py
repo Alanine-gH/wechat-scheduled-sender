@@ -29,6 +29,7 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Dict, List
 from urllib.parse import parse_qs, urlparse
 
 # 必须在导入 sender / contacts 之前完成路径重定向
@@ -37,6 +38,7 @@ import userdata
 userdata.configure(os.environ.get("WCS_DATA_ROOT"))
 
 import contacts as contacts_mod  # noqa: E402
+import media as media_mod  # noqa: E402
 import planner  # noqa: E402
 from sender import SendEngine, find_wechat_window  # noqa: E402
 
@@ -161,7 +163,9 @@ def _run_plan(plan: dict) -> None:
                 "r%02d_%s_%s.png" % (rnd["index"], time.strftime("%H%M%S"), _safe(display)),
             )
             res = engine.send_to(wxid or display, text, display=display,
-                                 username=wxid, shot_path=shot_path)
+                                 username=wxid, shot_path=shot_path,
+                                 media_path=pair.get("media_path") or None,
+                                 media_first=bool(pair.get("media_first", True)))
             if res.get("cancelled"):
                 # 被停止指令中断，不算失败，也不再继续
                 RT.log("WARN", "已停止：中断于 %s" % display)
@@ -169,7 +173,13 @@ def _run_plan(plan: dict) -> None:
             if res.get("ok"):
                 RT.progress["sent"] += 1
                 tag = "已校验" if res.get("verified") else ("未回读" if wxid else "无wxid")
-                RT.log("OK", "已发送 -> %s [%s] | %s" % (display, tag, text[:24].replace("\n", " ")))
+                extra = ""
+                mp = pair.get("media_path")
+                if mp:
+                    extra = " [素材 %s]" % os.path.basename(mp)
+                RT.log("OK", "已发送 -> %s [%s]%s | %s"
+                       % (display, tag, extra,
+                          (text or "(仅素材)")[:24].replace("\n", " ")))
             else:
                 RT.progress["failed"] += 1
                 RT.log("ERROR", "发送失败 -> %s : %s" % (display, res.get("error")))
@@ -302,15 +312,42 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/plan":
                 msgs = planner.load_messages(MESSAGES_FILE, read_mode())
                 targets = body.get("targets") or []
+                # 素材：按界面配置收集，再按目标轮转分配
+                media_spec = body.get("media") or {}
+                media_items = []
+                media_by_target: Dict[str, List[str]] = {}
+                if media_spec and targets:
+                    try:
+                        media_items = media_mod.collect(media_spec)
+                    except Exception:
+                        media_items = []
+                    if media_items:
+                        mode = (media_spec.get("assign_mode") or "rotate").lower()
+                        seed = None
+                        if mode == "shuffle":
+                            seed = int(time.strftime("%Y%m%d"))
+                        assign = media_mod.assign(media_items, targets, mode=mode, seed=seed)
+                        media_by_target = {
+                            k: [x.path for x in v] for k, v in assign.items()
+                        }
                 plan = planner.build_plan(
                     messages=msgs, targets=targets,
                     rounds=int(body.get("rounds") or planner.DEFAULT_ROUNDS),
                     per_round=int(body.get("per_round") or planner.DEFAULT_PER_ROUND),
                     interval_min=float(body.get("interval_min") or planner.DEFAULT_INTERVAL_MIN),
                     interval_max=float(body.get("interval_max") or planner.DEFAULT_INTERVAL_MAX),
+                    media_by_target=media_by_target,
+                    media_first=bool(media_spec.get("media_first", True)),
                 )
+                plan["media"] = media_mod.describe(media_items) if media_items else None
                 RT.plan = plan
                 return self._json({"ok": True, "plan": plan})
+
+            if p == "/api/media":
+                # 预览素材：只收集不发送，让用户确认选对了
+                spec = body.get("media") or body or {}
+                items = media_mod.collect(spec)
+                return self._json({"ok": True, "media": media_mod.describe(items)})
 
             if p == "/api/start":
                 if RT.running:
