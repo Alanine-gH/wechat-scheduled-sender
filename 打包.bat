@@ -51,8 +51,12 @@ if "%VER%"=="" (
 ) else (
     echo [i] Building NSIS installer as version %VER% ...
 )
-echo     Cache stays inside: %~dp0cache\electron-builder
-echo     Output goes to:     %~dp0dist
+REM Path must be QUOTED here: %~dp0 can contain "&" (this project lives
+REM under a directory whose name contains "&"), and an unquoted & makes
+REM cmd treat the rest of the line as a separate command ->
+REM "The system cannot find the path specified" (while still building fine).
+echo     Cache stays inside: "%~dp0cache\electron-builder"
+echo     Output goes to:     "%~dp0dist"
 echo.
 
 if "%VER%"=="" goto :build_plain
