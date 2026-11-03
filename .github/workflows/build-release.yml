@@ -1,13 +1,22 @@
 name: build-release
 
-# 触发方式：
-#  1) 推送 v* 形式的 tag（例如 v1.0.0）—— 自动构建并发布 Release
-#  2) 手动触发（workflow_dispatch）—— 构建并上传为 Artifact；
-#     勾选 publish_release 才会额外发布 Release
+# 触发方式：**仅手动触发**（workflow_dispatch）。
+#
+# 为什么不监听 tag 推送（曾经的坑，务必别改回去）：
+# 本地打包后用 `gh release create` 发布时，gh 会**创建并推送 v* tag**，
+# 于是这里被自动触发。而 CI 里的 package.json 版本恒为 1.0.0
+# （版本号只在本地 build.js 构建期间临时改写），结果：
+#   1) CI 额外产出一个 WeChatSender-1.0.0-x64.exe，
+#      被 action-gh-release 自动追加到同一个 Release 上 ——
+#      Release 里就多了一个版本号错误的包（实测 v1.5.0/v1.6.0/v1.7.0 都中招）
+#   2) 更严重：vendor/python 被 .gitignore 排除，CI 里**没有内置 Python**，
+#      它产出的安装包需要目标机自己装 Python —— 是个残废包，却被发布了
+#   3) action-gh-release 还会用它的通用文案**覆盖**手写的发布说明
+#      （那段文案还写着「需要已安装 Python 3.9+」，早已过时）
+#
+# 所以发布统一走本地：
+#   准备内嵌Python.bat  ->  打包.bat <版本>  ->  gh release create ...
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       publish_release:
@@ -15,9 +24,9 @@ on:
         type: boolean
         default: false
       version:
-        description: '版本号，用于 Release 标签（例如 v1.0.0；留空用 package.json 里的版本）'
+        description: '版本号，用于 Release 标签（例如 v1.5.0）'
         type: string
-        required: false
+        required: true
 
 permissions:
   contents: write
@@ -86,19 +95,17 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          if ('${{ github.event_name }}' -eq 'push') {
-            $tag = '${{ github.ref_name }}'
-          } elseif ('${{ inputs.version }}') {
-            $tag = '${{ inputs.version }}'
-          } else {
-            $tag = 'v' + (Get-Content package.json | ConvertFrom-Json).version
-          }
+          $tag = '${{ inputs.version }}'
+          if (-not $tag) { throw "必须填 version（例如 v1.5.0）" }
+          if (-not $tag.StartsWith('v')) { $tag = 'v' + $tag }
           Write-Host "Release 标签: $tag"
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: 发布 Release
-        # tag 推送时总是发布；手动触发时需要勾选 publish_release
-        if: github.event_name == 'push' || inputs.publish_release
+        # 只在手动触发且勾选 publish_release 时发布。
+        # 注意：CI 里没有 vendor/python（被 .gitignore 排除），
+        # 这样产出的安装包需要目标机自备 Python —— 想发布自包含包请走本地打包。
+        if: inputs.publish_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
@@ -106,10 +113,13 @@ jobs:
           draft: false
           generate_release_notes: true
           body: |
-            微信定时群发控制台 —— Windows x64 安装包
+            微信定时群发控制台 —— Windows x64 安装包（CI 构建）
+
+            **注意：CI 构建的包不含内置 Python**，目标电脑需自备 Python 3.9+。
+            需要「开箱即用」的自包含包，请下载同一版本的本地构建产物。
 
             **使用前请注意**
-            - 需要本机已登录微信 4.x（桌面版），并已安装 Python 3.9+
+            - 需要本机已登录微信 4.x（桌面版）
             - 安装到可写目录（例如 `D:\WeChatSender`），不要装在 `C:\Program Files`
             - 安装包未做代码签名，Windows 可能提示「未知发布者」
 
