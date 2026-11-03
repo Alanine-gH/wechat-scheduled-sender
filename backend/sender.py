@@ -1115,7 +1115,9 @@ class SendEngine:
                 verify: bool = True,
                 media_path: Optional[str] = None,
                 media_kind: Optional[str] = None,
-                media_first: bool = True) -> Dict[str, Any]:
+                media_first: bool = True,
+                verify_timeout: float = 8.0,
+                clear_before: bool = True) -> Dict[str, Any]:
         """打开会话 -> 校验目标 -> 发送（可选先/后发素材）-> 回读校验 -> 截图。
 
         判定成功的条件：打开成功 + 已触发发送 + (输入框已清空 或 回读命中)
@@ -1154,11 +1156,13 @@ class SendEngine:
             # 发送前先清空输入框，避免上一轮的残留混进来。
             # 清完要等一下并确认真的空了 —— 微信清空是异步的，
             # 立刻粘贴会和残留混在一起（纯素材发送就踩过这个坑）。
-            self.clear_input()
-            for _ in range(6):
-                if self.input_is_empty():
-                    break
-                time.sleep(0.4)
+            # clear_before=False 时跳过（少数情况下用户想保留草稿）。
+            if clear_before:
+                self.clear_input()
+                for _ in range(6):
+                    if self.input_is_empty():
+                        break
+                    time.sleep(0.4)
 
             def _do_media() -> bool:
                 if not has_media:
@@ -1199,11 +1203,11 @@ class SendEngine:
                 res["error"] = "写入输入框或触发发送失败"
                 return res
 
-            # 等输入框被清空（最多 8 秒轮询）。
+            # 等输入框被清空（最多 verify_timeout 秒轮询）。
             # 微信发图片/文件后清空输入区需要一点时间，实测约 3~5 秒；
             # 固定 sleep 太短会把成功判成失败（「纯图片」就踩过这个坑）。
             cleared = False
-            deadline = time.time() + 8.0
+            deadline = time.time() + float(verify_timeout)
             while time.time() < deadline:
                 if self.input_is_empty():
                     cleared = True
@@ -1215,7 +1219,7 @@ class SendEngine:
             res["btn_gone"] = self._send_button() is None
 
             verified = False
-            # 回读校验也要能被取消叫停（它最长等 8 秒）
+            # 回读校验也要能被取消叫停（它最长等 verify_timeout）
             if verify and username and not self.cancelled() and (text or "").strip():
                 verified = self.verify_in_db(username, text or "")
             res["verified"] = verified
@@ -1225,7 +1229,8 @@ class SendEngine:
             media_verified = False
             if has_media and not has_text and username and not self.cancelled():
                 media_verified = self.verify_media_in_db(
-                    username, media_kind or "image", timeout=8.0)
+                    username, media_kind or "image",
+                    timeout=float(verify_timeout))
             res["media_verified"] = media_verified
 
             if shot_path:

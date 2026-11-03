@@ -148,26 +148,50 @@ def _safe(name: str) -> str:
 
 def _send_one(engine, display: str, wxid, text: str, shot_dir: str,
               pair: dict, kind: str = "main",
-              kind_label: str = "") -> bool:
-    """发一条并记账（同时写投放日志）。
+              kind_label: str = "", cfg: Optional[Dict[str, Any]] = None) -> str:
+    """发一条（含重试）并记账，同时写投放日志。
 
-    返回 True 表示应该继续，False 表示被取消（应终止）。
-    ``kind`` 区分 main/hook，供周报统计投放量。
+    返回 ``"ok"`` / ``"fail"`` / ``"cancel"`` —— 调用方靠它判断
+    是否触发「连续失败中止」或停止。用字符串而不是布尔值，
+    是因为「失败」和「被取消」要区别对待：前者计数、后者立即停。
     """
+    cfg = cfg or schedule_config()
+    attempts = max(1, int(cfg.get("retry_times") or 0) + 1)
+    retry_delay = float(cfg.get("retry_delay_seconds") or 3)
+
     shot_path = os.path.join(
         shot_dir, time.strftime("%Y%m%d"),
         "r%02d_%s_%s.png" % (pair.get("index") or 1, time.strftime("%H%M%S"),
                              _safe(display)),
     )
-    res = engine.send_to(wxid or display, text, display=display,
-                         username=wxid, shot_path=shot_path,
-                         media_path=pair.get("media_path") or None,
-                         media_first=bool(pair.get("media_first", True)))
-    if res.get("cancelled"):
-        RT.log("WARN", "已停止：中断于 %s" % display)
-        return False
 
-    ok = bool(res.get("ok"))
+    res: Dict[str, Any] = {}
+    ok = False
+    for attempt in range(attempts):
+        if not RT.running:
+            return "cancel"
+        res = engine.send_to(wxid or display, text, display=display,
+                             username=wxid, shot_path=shot_path,
+                             media_path=pair.get("media_path") or None,
+                             media_first=bool(pair.get("media_first", True)),
+                             verify_timeout=float(cfg.get("verify_timeout") or 8),
+                             clear_before=bool(cfg.get("clear_input_before", True)))
+        if res.get("cancelled"):
+            return "cancel"
+        ok = bool(res.get("ok"))
+        if ok:
+            break
+        if attempt < attempts - 1:
+            RT.log("WARN", "发送失败，%.0f 秒后重试（第 %d/%d 次）-> %s：%s"
+                   % (retry_delay, attempt + 1, attempts - 1, display,
+                      res.get("error")))
+            slept = 0.0
+            while slept < retry_delay and RT.running:
+                time.sleep(min(1.0, retry_delay - slept))
+                slept += 1.0
+            if not RT.running:
+                return "cancel"
+
     # 投放日志：周报要靠它算「单群 7 条主文案 / 2-3 条钩子」的达成率
     try:
         report_mod.log_delivery(DATA_DIR, display, kind, ok)
@@ -181,27 +205,44 @@ def _send_one(engine, display: str, wxid, text: str, shot_dir: str,
         mp = pair.get("media_path")
         if mp:
             extra = " [素材 %s]" % os.path.basename(mp)
+        if attempts > 1 and res.get("_retried"):
+            extra += " [重试成功]"
         head = ("%s " % kind_label) if kind_label else ""
         RT.log("OK", "%s已发送 -> %s [%s]%s | %s"
                % (head, display, t, extra,
                   (text or "(仅素材)")[:24].replace("\n", " ")))
-    else:
-        RT.progress["failed"] += 1
-        RT.log("ERROR", "发送失败 -> %s : %s" % (display, res.get("error")))
-    return True
+        return "ok"
+
+    RT.progress["failed"] += 1
+    RT.log("ERROR", "发送失败（已试 %d 次）-> %s : %s"
+           % (attempts, display, res.get("error")))
+    return "fail"
 
 
-def _run_events(engine, plan: dict) -> None:
+def _run_events(engine, plan: dict) -> List[str]:
     """按「绝对时间事件表」执行（内容编排模式）。
 
     事件已按时间排好序，逐条等到点再发。这样群 1 的钩子可以插在
     群 5 的主文案之前 —— 而不是把所有钩子堆到全部主文案之后。
+
+    返回：**主文案发送成功**的目标列表（供每日/每周上限记账）。
     """
     events = plan.get("events") or []
     RT.progress.update({"total": len(events), "sent": 0, "failed": 0,
                         "total_rounds": 1, "round": 1})
     RT.log("INFO", "===== 内容编排模式：%d 个事件，起始 %s ====="
            % (len(events), plan.get("start_at")))
+
+    cfg = schedule_config()
+    # 连续失败中止：一条失败可能是偶发，连着失败通常是微信窗口出问题
+    # 或账号被限制，继续发只是白费功夫还可能加重风控
+    fail_streak_limit = int(cfg.get("max_fail_streak") or 0)
+    # 冷却：一口气连发几十条最像机器人
+    cooldown_every = int(cfg.get("cooldown_every") or 0)
+    cooldown_seconds = float(cfg.get("cooldown_seconds") or 0)
+    fail_streak = 0
+    sent_streak = 0
+    sent_main: List[str] = []
 
     for i, ev in enumerate(events):
         if not RT.running:
@@ -243,15 +284,40 @@ def _run_events(engine, plan: dict) -> None:
         wxid = (plan.get("username_of") or {}).get(ev.get("target") or "")
         kind = ev.get("kind") or "main"
         label = {"main": "[主文案]", "hook": "[钩子]"}.get(kind, "")
-        if not _send_one(engine, ev.get("target") or "", wxid,
-                         ev.get("text") or "", SHOT_DIR, pair,
-                         kind=kind, kind_label=label):
-            break
-        # 计时用的进度
+        status = _send_one(engine, ev.get("target") or "", wxid,
+                           ev.get("text") or "", SHOT_DIR, pair,
+                           kind=kind, kind_label=label, cfg=cfg)
         RT.progress["round"] = 1
+        if status == "cancel":
+            RT.log("WARN", "已停止：中断于 %s" % ev.get("target"))
+            break
+
+        if status == "ok":
+            fail_streak = 0
+            sent_streak += 1
+            if kind == "main" and ev.get("target"):
+                sent_main.append(ev["target"])
+            # 冷却：每发满 N 条强制休息，打断「连续不断发送」的机器特征
+            if cooldown_every > 0 and sent_streak >= cooldown_every:
+                sent_streak = 0
+                if i + 1 < len(events):
+                    RT.log("INFO", "已连发 %d 条，休息 %.0f 秒"
+                           % (cooldown_every, cooldown_seconds))
+                    slept = 0.0
+                    while slept < cooldown_seconds and RT.running:
+                        time.sleep(min(2.0, cooldown_seconds - slept))
+                        slept += 2.0
+        else:
+            fail_streak += 1
+            if fail_streak_limit > 0 and fail_streak >= fail_streak_limit:
+                RT.log("ERROR", "连续失败 %d 条，已自动中止（可在设置里调整"
+                                "「连续失败即中止」）" % fail_streak)
+                break
+
         if i + 1 >= len(events):
             break
         time.sleep(1.2)
+    return sent_main
 
 
 def _run_plan(plan: dict) -> None:
@@ -269,22 +335,28 @@ def _run_plan(plan: dict) -> None:
 
     # 内容编排模式：按绝对时间事件表跑
     if plan.get("mode") == "campaign" and plan.get("events"):
+        sent_main: List[str] = []
         try:
-            _run_events(engine, plan)
+            sent_main = _run_events(engine, plan)
         except Exception as exc:
             RT.log("ERROR", "执行异常: %s" % exc)
         RT.log("INFO", "任务结束。成功 %d / 失败 %d" %
                (RT.progress["sent"], RT.progress["failed"]))
-        # 记账供每周上限统计
+        # 记账供每日/每周上限统计。
+        # 只记**主文案真的发成功**的群：按计划里所有目标一律记账会让
+        # 失败的群也消耗额度，次数一多就莫名其妙被上限挡住。
         try:
-            for t in (plan.get("targets") or []):
-                scheduler.record_sent(t, DATA_DIR)
+            for t in sent_main:
+                scheduler.record_sent(t, DATA_DIR, kind="main")
         except Exception:
             pass
         RT.running = False
         return
 
     rounds = plan.get("assignments") or []
+    cfg = schedule_config()
+    fail_streak_limit = int(cfg.get("max_fail_streak") or 0)
+    fail_streak = 0
     total = sum(len(r["pairs"]) for r in rounds)
     RT.progress.update({"total": total, "sent": 0, "failed": 0,
                         "total_rounds": len(rounds), "round": 0})
@@ -316,8 +388,18 @@ def _run_plan(plan: dict) -> None:
             wxid = pair.get("username")
             text = pair.get("text")
             pair = dict(pair, index=rnd["index"])
-            if not _send_one(engine, display, wxid, text, SHOT_DIR, pair):
+            status = _send_one(engine, display, wxid, text, SHOT_DIR, pair)
+            if status == "cancel":
+                RT.log("WARN", "已停止：中断于 %s" % display)
                 break
+            # 老模式也要遵守「连续失败中止」，否则一个打不开的群会一路失败到底
+            if status == "fail":
+                fail_streak += 1
+                if fail_streak_limit > 0 and fail_streak >= fail_streak_limit:
+                    RT.log("ERROR", "连续失败 %d 条，已自动中止" % fail_streak)
+                    break
+            else:
+                fail_streak = 0
             time.sleep(1.2)
 
     RT.log("INFO", "任务结束。成功 %d / 失败 %d" %
@@ -538,19 +620,30 @@ class Handler(BaseHTTPRequestHandler):
                     weekly_cap = int(body.get("weekly_cap")
                                      if body.get("weekly_cap") is not None
                                      else cfg["weekly_cap"])
+                    daily_cap = int(body.get("daily_cap")
+                                    if body.get("daily_cap") is not None
+                                    else cfg["daily_cap"])
+                    run_cap = int(body.get("run_cap")
+                                  if body.get("run_cap") is not None
+                                  else cfg["run_cap"])
                     run_days = body.get("run_days") or cfg.get("run_days") or []
                     plan = planner.build_campaign_plan(
                         targets=targets,
                         campaign_obj=camp,
                         start_at=start_at,
                         interval_min=float(body.get("interval_min")
-                                           or planner.DEFAULT_INTERVAL_MIN),
+                                           or cfg["interval_min"]),
                         interval_max=float(body.get("interval_max")
-                                           or planner.DEFAULT_INTERVAL_MAX),
+                                           or cfg["interval_max"]),
                         hook_delay_min=hook_delay,
                         hook_days=hook_days,
                         media_by_target=media_by_target,
                         weekly_cap=weekly_cap,
+                        daily_cap=daily_cap,
+                        run_cap=run_cap,
+                        enforce_window=bool(cfg["enforce_window"]),
+                        window_start=cfg["send_window_start"],
+                        window_end=cfg["send_window_end"],
                         data_dir=DATA_DIR,
                     )
                     # 「只在指定星期执行」：今天不在名单里就产出空计划并说明原因

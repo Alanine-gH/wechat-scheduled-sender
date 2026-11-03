@@ -226,6 +226,11 @@ def build_campaign_plan(targets: List[str],
                         hook_days: Optional[List[str]] = None,
                         media_by_target: Optional[Dict[str, List[str]]] = None,
                         weekly_cap: int = _scheduler.DEFAULT_WEEKLY_CAP,
+                        daily_cap: int = 0,
+                        run_cap: int = 0,
+                        enforce_window: bool = False,
+                        window_start: Optional[str] = "08:00",
+                        window_end: Optional[str] = "22:00",
                         data_dir: str = "",
                         now: Optional[_dt.datetime] = None) -> Dict[str, Any]:
     """生成「按星期内容 + 固定时间 + 双波次」的投放计划。
@@ -234,15 +239,21 @@ def build_campaign_plan(targets: List[str],
     （主文案 + 各自的钩子），而不是「两条之间的相对等待」。
     方案要求固定晚 8 点发、30 分钟后补钩子，相对等待做不到这一点。
 
-    ``weekly_cap`` > 0 时按「每群每周上限」过滤目标（状态记在 data_dir）。
+    ``weekly_cap`` / ``daily_cap`` > 0 时按上限过滤目标（状态记在 data_dir）。
+    ``run_cap`` > 0 时截断事件总数（防手滑一次发太多）。
+    启用 ``enforce_window`` 时，落在时段外的事件会被剔除并记录原因。
     """
     day = day or (now or _dt.datetime.now()).date()
     media_by_target = media_by_target or {}
 
-    # 频次过滤：达到本周上限的群本轮跳过
+    # 频次过滤：达到本周/本日上限的群本轮跳过
     skipped: List[str] = []
-    if weekly_cap and weekly_cap > 0 and data_dir:
-        allowed = _scheduler.filter_by_cap(targets, data_dir, weekly_cap, day)
+    skip_detail: Dict[str, str] = {}
+    if data_dir and (weekly_cap > 0 or daily_cap > 0):
+        skip_detail = _scheduler.skip_reasons(targets, data_dir, weekly_cap,
+                                              daily_cap, day)
+        allowed = _scheduler.filter_by_caps(targets, data_dir, weekly_cap,
+                                            daily_cap, day)
         skipped = [t for t in targets if t not in allowed]
         targets = allowed
 
@@ -252,11 +263,21 @@ def build_campaign_plan(targets: List[str],
         hook_delay_min=hook_delay_min, hook_days=hook_days,
         media_by_target=media_by_target,
         seed=day.isoformat(), now=now,
+        enforce_window=enforce_window,
+        window_start=window_start, window_end=window_end,
     )
 
-    # datetime 不能直接 JSON 序列化，统一转成 ISO 字符串
+    # 时段外事件先剔除（带原因），再逐个序列化
     out_events: List[Dict[str, Any]] = []
+    window_skipped: List[Dict[str, str]] = []
     for e in events:
+        if e.get("skip_reason"):
+            window_skipped.append({
+                "target": e["target"], "kind": e["kind"],
+                "at": e["at"].isoformat(timespec="seconds"),
+                "reason": e["skip_reason"],
+            })
+            continue
         out_events.append({
             "at": e["at"].isoformat(timespec="seconds"),
             "target": e["target"],
@@ -265,6 +286,12 @@ def build_campaign_plan(targets: List[str],
             "media_path": e.get("media_path") or "",
             "media_first": True,
         })
+
+    # 单次运行上限：截断事件表并如实报告截掉了多少
+    truncated = 0
+    if run_cap and run_cap > 0 and len(out_events) > run_cap:
+        truncated = len(out_events) - run_cap
+        out_events = out_events[:run_cap]
 
     main_count = sum(1 for e in out_events if e["kind"] == "main")
     hook_count = sum(1 for e in out_events if e["kind"] == "hook")
@@ -286,7 +313,14 @@ def build_campaign_plan(targets: List[str],
         "targets": targets,
         "target_count": len(targets),
         "skipped_by_cap": skipped,
+        "skipped_detail": skip_detail,
         "weekly_cap": weekly_cap,
+        "daily_cap": daily_cap,
+        "run_cap": run_cap,
+        "truncated_by_run_cap": truncated,
+        "window_skipped": window_skipped,
+        "enforce_window": bool(enforce_window),
+        "window": "%s~%s" % (window_start, window_end) if enforce_window else "",
         "total_messages": len(out_events),
         "main_count": main_count,
         "hook_count": hook_count,

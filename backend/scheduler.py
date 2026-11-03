@@ -68,6 +68,43 @@ def in_days(date: _dt.date, days: Optional[List[str]]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 发送时段窗口
+# ---------------------------------------------------------------------------
+def in_window(when: _dt.datetime,
+              start: Optional[str] = "08:00",
+              end: Optional[str] = "22:00") -> bool:
+    """判断某时刻是否落在允许发送的时段内。
+
+    支持跨零点（如 22:00 ~ 06:00）：把时段看成环上的一段，
+    而不是简单地比较 start <= t <= end —— 后者对跨零点会永远为假。
+    起止相同视为全天开放。
+    """
+    if not start or not end or start == end:
+        return True
+    sh, sm = parse_hhmm(start)
+    eh, em = parse_hhmm(end)
+    cur = when.hour * 60 + when.minute
+    lo, hi = sh * 60 + sm, eh * 60 + em
+    if lo < hi:
+        return lo <= cur < hi
+    # 跨零点：cur 在 [lo, 1440) 或 [0, hi)
+    return cur >= lo or cur < hi
+
+
+def next_window_start(when: _dt.datetime,
+                      start: Optional[str] = "08:00",
+                      end: Optional[str] = "22:00") -> _dt.datetime:
+    """返回从 when 起的下一个时段起点；已在窗口内则原样返回。"""
+    if in_window(when, start, end):
+        return when
+    sh, sm = parse_hhmm(start)
+    cand = _dt.datetime.combine(when.date(), _dt.time(hour=sh, minute=sm))
+    if cand <= when:
+        cand += _dt.timedelta(days=1)
+    return cand
+
+
+# ---------------------------------------------------------------------------
 # 事件队列
 # ---------------------------------------------------------------------------
 def build_events(targets: List[str],
@@ -80,7 +117,10 @@ def build_events(targets: List[str],
                  hook_days: Optional[List[str]] = None,
                  media_by_target: Optional[Dict[str, List[str]]] = None,
                  seed: Optional[str] = None,
-                 now: Optional[_dt.datetime] = None) -> List[Dict[str, Any]]:
+                 now: Optional[_dt.datetime] = None,
+                 enforce_window: bool = False,
+                 window_start: Optional[str] = "08:00",
+                 window_end: Optional[str] = "22:00") -> List[Dict[str, Any]]:
     """生成按时间排序的事件表。
 
     每个目标产生两类事件：
@@ -88,6 +128,10 @@ def build_events(targets: List[str],
         各目标之间按 ``interval_min..interval_max`` 随机错开；
       * ``hook`` —— 资料钩子，时间 = 该目标主文案 + ``hook_delay_min`` 分钟，
         且**仅当当天在 hook_days 里**才生成。
+
+    启用 ``enforce_window`` 时：起点若落在时段外会顺延到下一个时段起点；
+    任何落在时段外的事件带 ``skip_reason`` 返回（调用方应过滤掉），
+    而不是静默发送 —— 半夜发消息是最容易被投诉的一种失误。
 
     返回的事件都带绝对时间 ``at``（datetime），调用方按序执行即可。
     """
@@ -103,6 +147,14 @@ def build_events(targets: List[str],
     cursor = at_datetime(day, start_at)
     if cursor <= now:
         cursor = now + _dt.timedelta(seconds=20)
+    if enforce_window:
+        cursor = next_window_start(cursor, window_start, window_end)
+
+    def _mark(ev: Dict[str, Any]) -> Dict[str, Any]:
+        if enforce_window and not in_window(ev["at"], window_start, window_end):
+            ev["skip_reason"] = ("超出允许发送时段 %s~%s"
+                                 % (window_start, window_end))
+        return ev
 
     rnd = random.Random("%s|stagger" % (seed or day.isoformat()))
     main_text = campaign.compose(day) if campaign else ""
@@ -113,24 +165,22 @@ def build_events(targets: List[str],
         allowed_hook = bool(hook_text)
 
     for i, tgt in enumerate(targets):
-        if not in_days(day, None):
-            break
-        at_main = cursor if i == 0 else cursor
-        events.append({
+        at_main = cursor
+        events.append(_mark({
             "at": at_main,
             "target": tgt,
             "kind": "main",
             "text": main_text,
             "media_path": (media_by_target.get(tgt) or [""])[0],
-        })
+        }))
         if hook_text and allowed_hook:
-            events.append({
+            events.append(_mark({
                 "at": at_main + _dt.timedelta(minutes=float(hook_delay_min)),
                 "target": tgt,
                 "kind": "hook",
                 "text": hook_text,
                 "media_path": "",
-            })
+            }))
         cursor = cursor + _dt.timedelta(
             seconds=rnd.uniform(interval_min, interval_max) * 60.0)
 
@@ -170,35 +220,104 @@ def week_key(date: Optional[_dt.date] = None) -> str:
     return "%d-W%02d" % (iso[0], iso[1])
 
 
+def day_key(date: Optional[_dt.date] = None) -> str:
+    return (date or _dt.date.today()).isoformat()
+
+
 def filter_by_cap(targets: List[str], data_dir: str,
                   cap: int, date: Optional[_dt.date] = None) -> List[str]:
-    """按「每群每周上限」过滤目标；cap<=0 表示不限。"""
-    if cap <= 0:
+    """按「每群每周上限」过滤目标；cap<=0 表示不限。
+
+    保留这个函数是为了兼容既有调用；新代码请用 filter_by_caps（同时管日/周）。
+    """
+    return filter_by_caps(targets, data_dir, cap, 0, date)
+
+
+def filter_by_caps(targets: List[str], data_dir: str,
+                   weekly_cap: int = 0, daily_cap: int = 0,
+                   date: Optional[_dt.date] = None) -> List[str]:
+    """同时按「每群每周」与「每群每日」上限过滤；0 表示不限。
+
+    每日上限的意义：计划可以一天跑好几次，或手滑点了两遍开始 ——
+    每周上限拦不住这种重复，日上限能。
+    """
+    if weekly_cap <= 0 and daily_cap <= 0:
         return list(targets)
     state = load_state(data_dir)
-    wk = week_key(date)
-    counts = (state.get("weekly") or {}).get(wk) or {}
-    return [t for t in targets if int(counts.get(t) or 0) < cap]
+    wk, dk = week_key(date), day_key(date)
+    w_counts = (state.get("weekly") or {}).get(wk) or {}
+    d_counts = (state.get("daily") or {}).get(dk) or {}
+    out = []
+    for t in targets:
+        if weekly_cap > 0 and int(w_counts.get(t) or 0) >= weekly_cap:
+            continue
+        if daily_cap > 0 and int(d_counts.get(t) or 0) >= daily_cap:
+            continue
+        out.append(t)
+    return out
+
+
+def skip_reasons(targets: List[str], data_dir: str,
+                 weekly_cap: int = 0, daily_cap: int = 0,
+                 date: Optional[_dt.date] = None) -> Dict[str, str]:
+    """给出每个被跳过的目标的原因（前端展示用，避免只报「跳过了」却不说是为什么）。"""
+    state = load_state(data_dir)
+    wk, dk = week_key(date), day_key(date)
+    w_counts = (state.get("weekly") or {}).get(wk) or {}
+    d_counts = (state.get("daily") or {}).get(dk) or {}
+    out: Dict[str, str] = {}
+    for t in targets:
+        w = int(w_counts.get(t) or 0)
+        d = int(d_counts.get(t) or 0)
+        if weekly_cap > 0 and w >= weekly_cap:
+            out[t] = "本周已发 %d 次，达到每周上限 %d" % (w, weekly_cap)
+        elif daily_cap > 0 and d >= daily_cap:
+            out[t] = "今天已发 %d 次，达到每日上限 %d" % (d, daily_cap)
+    return out
 
 
 def record_sent(target: str, data_dir: str,
-                date: Optional[_dt.date] = None) -> None:
-    """记一次投放，供每周上限统计。"""
+                date: Optional[_dt.date] = None,
+                kind: str = "main") -> None:
+    """记一次投放，供每日/每周上限统计。
+
+    只统计 ``kind == "main"``：上限约束的是「对这个群发了几轮」，
+    钩子是该轮的附属动作，把它也计入会让上限提前触发。
+    """
+    if kind != "main":
+        return
     state = load_state(data_dir)
+    wk, dk = week_key(date), day_key(date)
     weekly = state.setdefault("weekly", {})
-    wk = week_key(date)
-    bucket = weekly.setdefault(wk, {})
-    bucket[target] = int(bucket.get(target) or 0) + 1
-    # 只保留最近 8 周，避免文件无限膨胀
-    if len(weekly) > 8:
-        for k in sorted(weekly.keys())[:-8]:
-            weekly.pop(k, None)
+    daily = state.setdefault("daily", {})
+    bucket_w = weekly.setdefault(wk, {})
+    bucket_d = daily.setdefault(dk, {})
+    bucket_w[target] = int(bucket_w.get(target) or 0) + 1
+    bucket_d[target] = int(bucket_d.get(target) or 0) + 1
+    # 各自只保留最近 8 个桶，避免文件无限膨胀
+    for box in (weekly, daily):
+        if len(box) > 8:
+            for k in sorted(box.keys())[:-8]:
+                box.pop(k, None)
     save_state(data_dir, state)
 
 
 def cap_report(targets: List[str], data_dir: str,
-               date: Optional[_dt.date] = None) -> Dict[str, int]:
+               date: Optional[_dt.date] = None) -> Dict[str, Any]:
+    """本周/今日已发次数。"""
     state = load_state(data_dir)
-    wk = week_key(date)
-    counts = (state.get("weekly") or {}).get(wk) or {}
-    return {t: int(counts.get(t) or 0) for t in targets}
+    wk, dk = week_key(date), day_key(date)
+    return {
+        "week": wk,
+        "day": dk,
+        "weekly": {t: int((((state.get("weekly") or {}).get(wk)) or {}).get(t) or 0)
+                   for t in targets},
+        "daily": {t: int((((state.get("daily") or {}).get(dk)) or {}).get(t) or 0)
+                  for t in targets},
+    }
+
+
+def reset_day(data_dir: str, date: Optional[_dt.date] = None) -> None:
+    state = load_state(data_dir)
+    (state.get("daily") or {}).pop(day_key(date), None)
+    save_state(data_dir, state)
