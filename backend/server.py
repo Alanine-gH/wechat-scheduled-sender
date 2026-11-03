@@ -40,6 +40,7 @@ userdata.configure(os.environ.get("WCS_DATA_ROOT"))
 
 import campaign as campaign_mod  # noqa: E402
 import contacts as contacts_mod  # noqa: E402
+import guard as guard_mod  # noqa: E402
 import inbox as inbox_mod  # noqa: E402
 import leads as leads_mod  # noqa: E402
 import media as media_mod  # noqa: E402
@@ -473,6 +474,25 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/plan":
                 msgs = planner.load_messages(MESSAGES_FILE, read_mode())
                 targets = body.get("targets") or []
+                # 合规校验：方案风控 1 要求群内不得出现违规开票暗示。
+                # 在生成计划时就拦，别等发出去才发现。
+                # 编排模式还要带上引导语与钩子（它们也是要发出去的内容）。
+                check_items = [("消息池", m) for m in msgs]
+                if body.get("campaign"):
+                    camp_chk = campaign_mod.load_campaign(
+                        body.get("campaign_file") or CAMPAIGN_FILE)
+                    for k in campaign_mod.WEEKDAY_KEYS:
+                        g = camp_chk.guides.get(k) or ""
+                        if g:
+                            check_items.append(
+                                ("引导语(%s)" % campaign_mod.weekday_cn(k), g))
+                    for i, h in enumerate(camp_chk.hooks or [], 1):
+                        check_items.append(("钩子%d" % i, h))
+                guard_hits = guard_mod.check_many(check_items)
+                if not guard_hits["ok"]:
+                    return self._json({
+                        "ok": False, "error": "内容命中违规措辞，已拦下",
+                        "guard": guard_hits}, 400)
                 # 素材：按界面配置收集，再按目标轮转分配
                 media_spec = body.get("media") or {}
                 media_items = []
@@ -533,6 +553,7 @@ class Handler(BaseHTTPRequestHandler):
                                "、".join(run_days)))
                     plan["media"] = media_mod.describe(media_items) if media_items else None
                     plan["campaign_file"] = camp_path
+                    plan["guard"] = guard_hits
                     RT.plan = plan
                     return self._json({"ok": True, "plan": plan})
 
@@ -546,8 +567,17 @@ class Handler(BaseHTTPRequestHandler):
                     media_first=bool(media_spec.get("media_first", True)),
                 )
                 plan["media"] = media_mod.describe(media_items) if media_items else None
+                plan["guard"] = guard_hits
                 RT.plan = plan
                 return self._json({"ok": True, "plan": plan})
+
+            if p == "/api/guard":
+                # 单独校验一段文本（界面里"改完先查一下"用）
+                body = body or {}
+                text = body.get("text") or ""
+                if not text:
+                    return self._json({"ok": False, "error": "缺少 text"}, 400)
+                return self._json({"ok": True, **guard_mod.check(text)})
 
             if p == "/api/media":
                 # 预览素材：只收集不发送，让用户确认选对了
