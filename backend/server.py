@@ -208,18 +208,28 @@ def _run_events(engine, plan: dict) -> None:
             RT.log("WARN", "收到停止指令，终止执行")
             break
         # 等到事件时间点；等待期间可被停止打断
+        # 注意：这里必须用 datetime.datetime 而不是 datetime ——
+        # `import datetime` 拿到的是**模块**，模块上并没有 fromisoformat/now，
+        # 直接 datetime.fromisoformat() 会抛 AttributeError；
+        # 早期版本被 except 吞掉后 at 变成 None，整段等待被跳过，
+        # 结果是所有事件连着发（实测钩子比计划早 29 秒落库）。
         try:
-            at = datetime.fromisoformat(ev["at"])
+            at = datetime.datetime.fromisoformat(ev["at"])
         except Exception:
             at = None
         if at is not None:
+            # 只报一次等待，不然每 2 秒一条会把日志刷爆
+            announced = False
             while RT.running:
-                gap = (at - datetime.now()).total_seconds()
+                gap = (at - datetime.datetime.now()).total_seconds()
                 if gap <= 0:
                     break
-                if gap > 5:
+                if not announced and gap > 5:
+                    announced = True
                     RT.log("INFO", "等待 %.0f 秒后发送 %s -> %s"
-                           % (gap, ev.get("kind"), ev.get("target")))
+                           % (gap, {"main": "主文案", "hook": "钩子"}.get(
+                               ev.get("kind") or "", ev.get("kind")),
+                              ev.get("target")))
                 time.sleep(min(2.0, max(0.2, gap)))
         if not RT.running:
             break
