@@ -27,4 +27,7 @@ contextBridge.exposeInMainWorld('__WCS__', {
   baseUrl: port ? `http://127.0.0.1:${port}` : '',
   // 返回 Promise<string[]>（用户取消则返回空数组）
   pickFiles: () => ipcRenderer.invoke('wcs:pick-files'),
+  // 开机自启：get -> {ok,on,packaged}；set -> {ok,on} 或 {ok:false,error}
+  getAutostart: () => ipcRenderer.invoke('wcs:get-autostart'),
+  setAutostart: (on) => ipcRenderer.invoke('wcs:set-autostart', !!on),
 });

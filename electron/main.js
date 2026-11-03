@@ -202,6 +202,41 @@ function registerIpc() {
       return [];
     }
   });
+
+  // 开机自启：用 Electron 原生 API（底层写 HKCU 的 Run 键），
+  // 比自己在注册表里拼字符串可靠 —— 安装路径含 "&" 等字符时也不会写坏。
+  // 开发模式（electron .）不写：那会把 electron.exe 注册成启动项，没有意义。
+  ipcMain.handle('wcs:get-autostart', () => {
+    try {
+      if (!app.isPackaged) {
+        return { ok: true, on: false, packaged: false };
+      }
+      const s = app.getLoginItemSettings();
+      return { ok: true, on: !!s.openAtLogin, packaged: true,
+               exe: process.execPath };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
+  ipcMain.handle('wcs:set-autostart', (e, on) => {
+    try {
+      if (!app.isPackaged) {
+        return { ok: false, packaged: false,
+                 error: '开发模式下不写开机自启（会注册成 electron.exe）。'
+                      + '装好安装版后再设置。' };
+      }
+      app.setLoginItemSettings({
+        openAtLogin: !!on,
+        path: process.execPath,
+        args: [],
+      });
+      const s = app.getLoginItemSettings();
+      return { ok: true, on: !!s.openAtLogin };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
 }
 
 function createWindow(port) {

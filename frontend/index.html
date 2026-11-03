@@ -439,6 +439,16 @@
       </div>
       <div class="note" id="autoBox" style="display:block">–</div>
 
+      <div class="row" style="margin-top:10px">
+        <label class="chk" style="margin:0">
+          <input type="checkbox" id="autostartChk">
+          <span>开机自启（登录 Windows 后自动运行本程序）</span>
+        </label>
+        <span class="pill" id="autostartMsg">–</span>
+      </div>
+      <div class="hint" style="margin-top:2px">自动运行要生效，程序得先在跑。
+        勾上这个才算真正无人值守——否则每天还得手动开一次程序。</div>
+
       <h3 style="margin:18px 0 6px;font-size:13px">备份与恢复</h3>
       <p class="hint" style="margin-top:0">把配置、文案、线索打成一个 zip。
         恢复前会<b>自动快照当前状态</b>，恢复错了可以退回。</p>
@@ -1078,6 +1088,51 @@ async function autoResetDay(){
   }catch(e){ toast('操作失败：'+e.message); }
 }
 
+/* 开机自启（走 Electron 原生 API，不是后端） */
+async function loadAutostart(){
+  const w = window.__WCS__;
+  const chk = $('autostartChk'), msg = $('autostartMsg');
+  if(!w || !w.getAutostart){
+    chk.disabled = true;
+    msg.textContent = '浏览器模式不支持（需安装版）';
+    return;
+  }
+  try{
+    const r = await w.getAutostart();
+    if(r.ok){
+      chk.checked = !!r.on;
+      chk.disabled = !r.packaged;
+      msg.textContent = r.packaged
+        ? (r.on ? '已开启' : '未开启')
+        : '开发模式不可用';
+    }else{
+      msg.textContent = '读取失败';
+    }
+  }catch(e){ msg.textContent = '读取失败：' + e.message; }
+}
+
+async function toggleAutostart(){
+  const w = window.__WCS__;
+  if(!w || !w.setAutostart) return;
+  const chk = $('autostartChk'), msg = $('autostartMsg');
+  try{
+    const r = await w.setAutostart(chk.checked);
+    if(r.ok){
+      chk.checked = !!r.on;
+      msg.textContent = r.on ? '已开启' : '未开启';
+      toast(r.on ? '已设置开机自启' : '已取消开机自启');
+    }else{
+      chk.checked = !chk.checked;   // 回滚勾选状态
+      msg.textContent = '设置失败';
+      toast(r.error || '设置失败');
+    }
+  }catch(e){
+    chk.checked = !chk.checked;
+    msg.textContent = '设置失败';
+    toast('设置失败：' + e.message);
+  }
+}
+
 /* ---------- 健康自检 ---------- */
 const DOCTOR_TAG = { ok: '正常', warn: '提醒', error: '异常' };
 
@@ -1558,6 +1613,7 @@ $('reloadAuto').addEventListener('click', loadAuto);
 $('saveAutoTargets').addEventListener('click', saveAutoTargets);
 $('autoRunNow').addEventListener('click', autoRunNow);
 $('autoResetDay').addEventListener('click', autoResetDay);
+$('autostartChk').addEventListener('change', toggleAutostart);
 
 /* ---------- 启动 ---------- */
 async function loadPaths(){
@@ -1584,6 +1640,7 @@ async function loadPaths(){
     loadReport().catch(()=>{});
     loadSettings().catch(()=>{});
     loadAuto().catch(()=>{});
+    loadAutostart().catch(()=>{});
     loadFails().catch(()=>{});
     loadBackups().catch(()=>{});
     loadTargets().catch(()=>{});
