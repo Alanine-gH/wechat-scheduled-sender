@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld('__WCS__', {
   setAutostart: (on) => ipcRenderer.invoke('wcs:set-autostart', !!on),
   // 打开独立设置窗口（单例，已开则聚焦）
   openSettings: () => ipcRenderer.invoke('wcs:open-settings'),
+  // 打开更新下载目录里的安装包（主进程校验路径白名单，别处打不开）
+  openPath: (p) => ipcRenderer.invoke('wcs:open-path', String(p || '')),
   // 关闭当前窗口（设置页的「关闭」按钮用；浏览器模式走 window.close）
   closeSettings: () => {
     try { window.close(); } catch (_) {}

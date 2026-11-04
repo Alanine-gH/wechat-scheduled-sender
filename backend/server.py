@@ -63,6 +63,7 @@ import report as report_mod  # noqa: E402
 import scheduler  # noqa: E402
 import settings as settings_mod  # noqa: E402
 import targets as targets_mod  # noqa: E402
+import update as update_mod  # noqa: E402
 from sender import SendEngine, find_wechat_window  # noqa: E402
 
 ROOT = userdata.data_root()
@@ -78,6 +79,10 @@ CAMPAIGN_FILE = os.path.join(DATA_DIR, "campaign.txt")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 
 AUTH_TOKEN = ""   # 由 main() 注入
+
+# 当前程序版本，由 main() 注入（Electron 传 app.getVersion()）。
+# 浏览器模式/直接跑 server.py 时留空，检查更新会提示「未知当前版本」。
+APP_VERSION = ""
 
 
 def read_mode() -> str:
@@ -785,6 +790,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True,
                                    "backups": backup_mod.list_backups(DATA_DIR),
                                    "files": list(backup_mod.BACKUP_FILES)})
+            if p == "/api/app":
+                # 程序自身信息：版本号与发布页。前端用来显示「当前版本」。
+                return self._json({
+                    "ok": True,
+                    "version": APP_VERSION or "未知",
+                    "repo": update_mod.REPO,
+                    "releases_url": update_mod.RELEASES_PAGE,
+                })
+            if p == "/api/update/check":
+                # 查 GitHub 最新正式版并与当前版本比较。
+                # 允许 ?refresh=1 绕过 5 分钟缓存（用户手点「再查一次」时用）。
+                refresh = (q.get("refresh") or ["0"])[0] in ("1", "true", "yes")
+                if not APP_VERSION:
+                    return self._json({
+                        "ok": False,
+                        "error": "拿不到当前版本号（未以桌面版启动），无法比较",
+                        "url": update_mod.RELEASES_PAGE,
+                    })
+                return self._json(update_mod.check(APP_VERSION, use_cache=not refresh))
+            if p == "/api/update/download/status":
+                return self._json({"ok": True, **update_mod.download_status()})
             if p == "/api/notify/pending":
                 # 待弹通知的高意向线索（前端轮询这个）
                 st = settings_mod.load(DATA_DIR)
@@ -1095,6 +1121,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "applied": n,
                                    "targets": targets_mod.describe(DATA_DIR)})
 
+            if p == "/api/update/download":
+                # 下载新版本安装包到 temp/update/。
+                # 注意：**不接受前端传 URL**，只接受资产名，服务端自己去 Release 里取，
+                # 避免这个接口被当成 SSRF 跳板。
+                body = body or {}
+                name = str(body.get("asset") or "")
+                return self._json(update_mod.start_download(DATA_DIR, name))
+
             if p == "/api/notify/ack":
                 # 标记已通知，避免同一线索反复弹窗
                 body = body or {}
@@ -1227,10 +1261,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(exc), "trace": traceback.format_exc()}, 500)
 
 
-def main(host="127.0.0.1", port=8791, token="", quiet=False):
+def main(host="127.0.0.1", port=8791, token="", quiet=False, version=""):
     """启动服务。port=0 表示由系统分配空闲端口（Electron 用这种模式）。"""
-    global AUTH_TOKEN
+    global AUTH_TOKEN, APP_VERSION
     AUTH_TOKEN = token or ""
+    APP_VERSION = (version or "").strip().lstrip("vV")
 
     srv = ThreadingHTTPServer((host, port), Handler)
     actual_port = srv.server_address[1]
@@ -1281,10 +1316,13 @@ if __name__ == "__main__":
     ap.add_argument("--token", default="", help="API 鉴权 token（留空则不校验）")
     ap.add_argument("--data-root", default="", help="用户文件根目录（默认安装目录）")
     ap.add_argument("--quiet", action="store_true", help="只输出 PORT=")
+    ap.add_argument("--version", default="",
+                    help="当前程序版本（Electron 传 app.getVersion()，用于检查更新）")
     args = ap.parse_args()
 
     if args.data_root:
         os.environ["WCS_DATA_ROOT"] = args.data_root
         userdata.configure(args.data_root)
 
-    main(port=args.port, token=args.token, quiet=args.quiet)
+    main(port=args.port, token=args.token, quiet=args.quiet,
+         version=args.version)

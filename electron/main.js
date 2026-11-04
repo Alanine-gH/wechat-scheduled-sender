@@ -117,9 +117,13 @@ function spawnPython(cand) {
     PYTHONUTF8: '1',
   });
 
+  // --version：把真实版本号交给 Python，检查更新要用它跟 GitHub 上的最新版比较。
+  // 打包后 app.getVersion() 读的是 asar 里 package.json 的 version（构建时已被
+  // build.js 改写成目标版本，例如 1.8.0），所以这里拿到的是对的版本。
   const child = spawn(
     cand.cmd,
-    [...cand.args, serverPath, '0', '--token', TOKEN, '--quiet'],
+    [...cand.args, serverPath, '0', '--token', TOKEN, '--quiet',
+     '--version', app.getVersion()],
     {
       cwd: DATA_ROOT,
       env,
@@ -233,6 +237,24 @@ function registerIpc() {
       return { ok: true };
     } catch (e) {
       log('打开设置页失败: ' + ((e && e.message) || e));
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
+  // 打开更新下载好的安装包（用系统默认方式，等于用户双击）
+  // 安全约束：只允许打开 <安装目录>/temp/update 下的文件 ——
+  // 这个通道能被渲染进程调用，不放白名单等于给了一个「执行任意文件」的入口。
+  ipcMain.handle('wcs:open-path', async (_e, p) => {
+    try {
+      const allowedDir = path.resolve(path.join(DATA_ROOT, 'temp', 'update'));
+      const real = path.resolve(String(p || ''));
+      if (real !== allowedDir && !real.startsWith(allowedDir + path.sep)) {
+        return { ok: false, error: '只允许打开更新下载目录里的文件' };
+      }
+      if (!fs.existsSync(real)) return { ok: false, error: '文件不存在' };
+      const err = await shell.openPath(real);
+      return err ? { ok: false, error: err } : { ok: true };
+    } catch (e) {
       return { ok: false, error: String((e && e.message) || e) };
     }
   });

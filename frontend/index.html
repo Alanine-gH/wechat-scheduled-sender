@@ -78,6 +78,19 @@
 
   .bar{height:5px;background:#eceff5;border-radius:4px;overflow:hidden;margin-top:12px}
   .bar>i{display:block;height:100%;width:0;background:var(--blue);border-radius:4px;transition:width .5s var(--ease)}
+
+  /* 检查更新 */
+  .sep{height:1px;background:var(--line);margin:16px 0 14px}
+  .updbox{margin-top:12px;border:1px solid var(--line);border-radius:12px;
+    padding:12px 14px;background:#fbfcfe;animation:rise .35s var(--ease) both}
+  .updbox.ok{border-color:#cfe8da;background:#f6fdf9}
+  .updbox.new{border-color:#cfdcff;background:var(--blue-soft)}
+  .updbox.err{border-color:#f2d5d5;background:#fdf5f5}
+  .updnotes{margin-top:8px;max-height:230px;overflow:auto;white-space:pre-wrap;
+    font-size:12px;line-height:1.65;color:var(--ink2);
+    border-top:1px dashed var(--line);padding-top:8px}
+  /* 把 <a class="btn"> 当按钮用时，去掉链接默认的下划线与蓝色 */
+  a.btn{text-decoration:none;display:inline-flex;align-items:center;justify-content:center;color:inherit}
 </style>
 
 </head>
@@ -380,6 +393,31 @@
 
       <p class="hint" style="margin-top:12px">备份恢复、发送时段、限额、冷却、
         关键词等全部在设置页里。</p>
+
+      <div class="sep"></div>
+
+      <div class="row" style="align-items:baseline">
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:12px;color:var(--ink2)">当前版本</div>
+          <div id="verNow" style="font-size:17px;font-weight:650;letter-spacing:-.2px">–</div>
+        </div>
+        <button class="btn" id="checkUpdate" type="button">检查更新</button>
+      </div>
+
+      <!-- 检查结果面板：默认隐藏，查到结果再展开 -->
+      <div id="updBox" class="updbox" hidden>
+        <div class="row" style="align-items:center;gap:10px">
+          <span class="dot" id="updDot"></span>
+          <b id="updTitle" style="font-size:13px">–</b>
+          <span class="pill" id="updMeta" style="margin-left:auto"></span>
+        </div>
+        <div id="updNotes" class="updnotes" hidden></div>
+        <div class="row" id="updActions" style="margin-top:10px" hidden>
+          <button class="btn primary" id="updDownload" type="button">下载安装包</button>
+          <a class="btn" id="updPage" href="#" target="_blank" rel="noopener">打开发布页</a>
+          <span class="pill" id="updProg"></span>
+        </div>
+      </div>
     </section>
 
     <section class="card rise full" style="animation-delay:.28s">
@@ -848,6 +886,154 @@ async function openSettingsPage(){
   }catch(e){ toast('打开设置页失败：' + e.message); }
 }
 
+/* ---------- 检查更新 ---------- */
+// 只做「查 + 下载 + 让你自己装」，**不做静默自动更新**。
+// 原因：安装包没有代码签名，静默更新在 Windows 上失败面太大；
+// electron-updater 还需要 publish 配置与额外依赖，不适合硬塞。详见 docs。
+let updTimer = null;
+let updLast = null;
+
+function fmtMB(n){ return (n / 1048576).toFixed(1) + ' MB'; }
+
+function showUpdBox(kind){
+  const box = $('updBox');
+  box.hidden = false;
+  box.className = 'updbox ' + (kind || '');
+}
+
+async function loadAppInfo(){
+  try{
+    const d = await api('/api/app');
+    $('verNow').textContent = (d.version && d.version !== '未知')
+      ? 'v' + d.version : '未知（非桌面版）';
+    if(d.releases_url) $('updPage').href = d.releases_url;
+  }catch(e){ $('verNow').textContent = '读取失败'; }
+}
+
+async function checkUpdateNow(manual){
+  const btn = $('checkUpdate');
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '检查中…';
+  try{
+    const d = await api('/api/update/check' + (manual ? '?refresh=1' : ''));
+    updLast = d;
+    $('updDot').className = 'dot';
+    $('updNotes').hidden = true;
+    $('updActions').hidden = true;
+    $('updProg').textContent = '';
+
+    if(!d.ok){
+      // 断网/限流时不打扰，只有手动点才报错
+      if(manual){
+        showUpdBox('err');
+        $('updTitle').textContent = '检查失败';
+        $('updMeta').textContent = '';
+        $('updNotes').hidden = false;
+        $('updNotes').textContent = d.error || '未知错误';
+      }else{ $('updBox').hidden = true; }
+      return;
+    }
+
+    const cur = d.current ? 'v' + d.current : '当前版本';
+    if(d.has_update){
+      showUpdBox('new');
+      $('updDot').className = 'dot on';
+      $('updTitle').textContent = '发现新版本 v' + d.latest;
+      $('updMeta').textContent = cur + ' → v' + d.latest
+        + (d.published_at ? ' · ' + d.published_at.slice(0, 10) : '');
+      if(d.notes){
+        $('updNotes').hidden = false;
+        $('updNotes').textContent = d.notes;
+      }
+      $('updActions').hidden = false;
+      $('updDownload').disabled = !d.has_asset;
+      $('updDownload').textContent = d.has_asset
+        ? '下载安装包（' + fmtMB(d.asset_size) + '）' : '该版本无安装包';
+      delete $('updDownload').dataset.done;
+      if(d.url) $('updPage').href = d.url;
+    }else if(manual){
+      showUpdBox('ok');
+      $('updDot').className = 'dot on';
+      $('updTitle').textContent = '已是最新版本';
+      $('updMeta').textContent = cur + '（GitHub 最新正式版：v' + d.latest + '）';
+    }else{ $('updBox').hidden = true; }
+  }catch(e){
+    if(manual){
+      showUpdBox('err');
+      $('updTitle').textContent = '检查失败';
+      $('updNotes').hidden = false;
+      $('updNotes').textContent = e.message;
+    }
+  }finally{
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
+async function pollDownload(){
+  try{
+    const s = await api('/api/update/download/status');
+    if(s.state === 'running'){
+      const pct = s.total ? Math.floor(s.got / s.total * 100) : 0;
+      $('updProg').textContent = fmtMB(s.got)
+        + (s.total ? ' / ' + fmtMB(s.total) + '（' + pct + '%）' : '');
+      updTimer = setTimeout(pollDownload, 700);
+      return;
+    }
+    if(s.state === 'done'){
+      $('updProg').textContent = '';
+      $('updDownload').textContent = '打开安装包';
+      $('updDownload').disabled = false;
+      $('updDownload').dataset.done = s.path || '';
+      showUpdBox('ok');
+      $('updDot').className = 'dot on';
+      $('updTitle').textContent = '安装包已下载';
+      $('updNotes').hidden = false;
+      $('updNotes').textContent = '已保存到：\n' + s.path
+        + '\n\n点「打开安装包」运行它，按提示装完即可。安装前建议先关掉本程序。';
+      return;
+    }
+    if(s.state === 'error'){
+      $('updProg').textContent = '';
+      $('updDownload').disabled = false;
+      $('updDownload').textContent = '重试下载';
+      showUpdBox('err');
+      $('updTitle').textContent = '下载失败';
+      $('updNotes').hidden = false;
+      $('updNotes').textContent = s.error || '未知错误';
+      return;
+    }
+    $('updProg').textContent = '';
+  }catch(e){ $('updProg').textContent = '状态读取失败'; }
+}
+
+async function downloadUpdate(){
+  const btn = $('updDownload');
+  if(btn.dataset.done){                      // 已下载完 -> 这次是「打开安装包」
+    const p = btn.dataset.done;
+    if(WCS && WCS.openPath){
+      const r = await WCS.openPath(p);
+      if(!r || !r.ok) toast('打开失败：' + ((r && r.error) || '未知'));
+    }else{ toast('请手动打开：' + p); }
+    return;
+  }
+  btn.disabled = true;
+  $('updProg').textContent = '准备下载…';
+  try{
+    const r = await api('/api/update/download', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({asset: (updLast && updLast.asset_name) || ''})});
+    if(!r.ok){
+      btn.disabled = false; $('updProg').textContent = '';
+      toast(r.error || '下载启动失败');
+      return;
+    }
+    if(updTimer) clearTimeout(updTimer);
+    updTimer = setTimeout(pollDownload, 600);
+  }catch(e){
+    btn.disabled = false; $('updProg').textContent = '';
+    toast('下载启动失败：' + e.message);
+  }
+}
 
 async function cleanupNow(){
   try{
@@ -1417,6 +1603,8 @@ $('cleanupNow').addEventListener('click', cleanupNow);
 $('runDoctor').addEventListener('click', runDoctor);
 
 $('openSettings').addEventListener('click', openSettingsPage);
+$('checkUpdate').addEventListener('click', ()=>checkUpdateNow(true));
+$('updDownload').addEventListener('click', downloadUpdate);
 
 /* 失败补发 */
 $('reloadFails').addEventListener('click', loadFails);
@@ -1463,6 +1651,9 @@ async function loadPaths(){
     loadTargets().catch(()=>{});
     // 新线索通知轮询（间隔由后端设置决定，改设置后下一轮自动生效）
     scheduleNotify(8000);
+    // 版本号 + 启动后静默查一次更新（有新版本才展开，没更新不占地方）
+    loadAppInfo().catch(()=>{});
+    setTimeout(()=>{ checkUpdateNow(false); }, 5000);
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));
   }
