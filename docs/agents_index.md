@@ -21,6 +21,10 @@
 
 | 路径 | 职责 |
 |---|---|
+| `frontend/index.html` | 主界面：账号与目标、内容、素材、编排、计划、执行、线索、运维入口 |
+| `frontend/settings.html` | **独立设置页**：30 项设置 + 自动运行 + 开机自启 + 备份恢复 |
+| `frontend/common.css` | 两页共用的样式（卡片/表单/按钮/表格/toast） |
+| `frontend/common.js` | 两页共用的脚本（环境、API、toast、转义、设置面板渲染） |
 | `backend/campaign.py` | 内容编排：按星期引导语 + 原文案拼接 + 资料钩子 |
 | `backend/scheduler.py` | 定时：绝对时间事件表、钩子延迟、每群每周上限 |
 | `backend/inbox.py` | 接收：轮询数据库找出「谁主动私聊了我」，意图分类 |

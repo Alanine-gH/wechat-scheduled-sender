@@ -183,6 +183,60 @@ let win = null;
 // 素材选择：渲染进程拿不到文件绝对路径（<input type=file> 只给文件名），
 // 所以由主进程弹系统对话框，把真实路径回传给界面。
 function registerIpc() {
+  // 设置页独立窗口：单例，已开就聚焦，避免开出多个
+  let settingsWin = null;
+
+  ipcMain.handle('wcs:open-settings', async () => {
+    try {
+      if (settingsWin && !settingsWin.isDestroyed()) {
+        settingsWin.focus();
+        return { ok: true, focused: true };
+      }
+      const uiPath = app.isPackaged
+        ? path.join(process.resourcesPath, 'frontend', 'settings.html')
+        : path.join(__dirname, '..', 'frontend', 'settings.html');
+
+      settingsWin = new BrowserWindow({
+        width: 980,
+        height: 900,
+        minWidth: 720,
+        minHeight: 560,
+        title: '设置 · 微信定时群发控制台',
+        backgroundColor: '#f7f8fa',
+        autoHideMenuBar: true,
+        parent: win || undefined,     // 跟随主窗口，但用 show:true 保持独立
+        webPreferences: {
+          preload: path.join(__dirname, 'preload.js'),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: false,
+          // 与主窗口共享同一端口与 token —— 设置页要调同一套接口
+          additionalArguments: [
+            '--wcs-port=' + mainPort,
+            '--wcs-token=' + TOKEN,
+            '--wcs-dataroot=' + DATA_ROOT,
+          ],
+        },
+      });
+      settingsWin.loadFile(uiPath);
+      settingsWin.on('closed', () => { settingsWin = null; });
+      settingsWin.webContents.on('did-fail-load', (_e, code, desc, url) =>
+        log('设置页加载失败 code=' + code + ' desc=' + desc + ' url=' + url)
+      );
+      settingsWin.webContents.on('console-message', (...args) => {
+        if (args.length >= 4 && typeof args[1] === 'number') {
+          log('settings[' + args[1] + '] ' + args[2]);
+        } else if (args[0] && typeof args[0] === 'object') {
+          log('settings[' + args[0].level + '] ' + args[0].message);
+        }
+      });
+      return { ok: true };
+    } catch (e) {
+      log('打开设置页失败: ' + ((e && e.message) || e));
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
   ipcMain.handle('wcs:pick-files', async () => {
     if (!win) return [];
     try {
@@ -239,7 +293,11 @@ function registerIpc() {
   });
 }
 
+// 记住主窗口用的服务端口：设置页要复用同一个后端，不能另起一个
+let mainPort = 0;
+
 function createWindow(port) {
+  mainPort = port;
   win = new BrowserWindow({
     width: 1280,
     height: 900,

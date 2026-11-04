@@ -30,4 +30,10 @@ contextBridge.exposeInMainWorld('__WCS__', {
   // 开机自启：get -> {ok,on,packaged}；set -> {ok,on} 或 {ok:false,error}
   getAutostart: () => ipcRenderer.invoke('wcs:get-autostart'),
   setAutostart: (on) => ipcRenderer.invoke('wcs:set-autostart', !!on),
+  // 打开独立设置窗口（单例，已开则聚焦）
+  openSettings: () => ipcRenderer.invoke('wcs:open-settings'),
+  // 关闭当前窗口（设置页的「关闭」按钮用；浏览器模式走 window.close）
+  closeSettings: () => {
+    try { window.close(); } catch (_) {}
+  },
 });

@@ -6,22 +6,10 @@
 <!-- 只允许连本地服务；界面内联样式/脚本因此放行 inline -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'">
 <title>微信定时群发控制台</title>
+<link rel="stylesheet" href="common.css">
 <style>
-  :root{
-    --bg:#f7f8fa; --panel:#ffffff; --ink:#17181b; --ink2:#5b6070; --line:#e6e8ee;
-    --blue:#2563eb; --blue-soft:#eef3ff; --green:#12a150; --red:#d94040;
-    --radius:14px; --shadow:0 1px 2px rgba(16,24,40,.04),0 8px 24px rgba(16,24,40,.06);
-    --ease:cubic-bezier(.16,1,.3,1);
-  }
-  *{box-sizing:border-box}
-  html,body{margin:0;padding:0}
-  body{font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-    background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}
+  /* 主界面专用样式（设置页用不到，所以留在这里） */
   .wrap{max-width:1180px;margin:0 auto;padding:28px 22px 80px}
-
-  @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-  @keyframes fade{from{opacity:0}to{opacity:1}}
-  .rise{animation:rise .55s var(--ease) both}
 
   header{margin-bottom:22px}
   h1{font-size:23px;margin:0 0 6px;letter-spacing:-.3px}
@@ -30,21 +18,7 @@
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
   @media(max-width:900px){.grid{grid-template-columns:1fr}}
 
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-    padding:18px 18px 16px;box-shadow:var(--shadow);
-    transition:box-shadow .3s var(--ease),transform .3s var(--ease),border-color .3s}
-  .card:hover{box-shadow:0 2px 6px rgba(16,24,40,.06),0 14px 36px rgba(16,24,40,.09)}
-  .card h2{font-size:14px;margin:0 0 4px;font-weight:600;letter-spacing:.2px}
-  .hint{color:var(--ink2);font-size:12px;margin:0 0 12px}
-
-  label{display:block;font-size:12px;color:var(--ink2);margin:12px 0 6px}
-  select,input[type=number],textarea,input[type=text]{
-    width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:10px;
-    background:#fff;font:inherit;color:var(--ink);outline:none;
-    transition:border-color .2s,box-shadow .2s}
-  select:focus,input:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft)}
-  textarea{min-height:150px;resize:vertical;line-height:1.55;font-family:inherit}
-
+  /* 多选下拉（选群/好友） */
   .msel{position:relative}
   .msel-btn{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:#fff;
     text-align:left;cursor:pointer;display:flex;align-items:center;justify-content:space-between;
@@ -95,51 +69,17 @@
   .chip .x{cursor:pointer;color:#8b93a7;font-weight:700;line-height:1}
   .chip .x:hover{color:var(--red)}
 
-  .btn{padding:9px 15px;border-radius:10px;border:1px solid var(--line);background:#fff;font:inherit;cursor:pointer;
-    transition:transform .14s var(--ease),background .2s,border-color .2s,box-shadow .2s}
-  .btn:hover{border-color:#cfd5e3;background:#fbfcfe}
-  .btn:active{transform:scale(.975)}
-  .btn.primary{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}
-  .btn.primary:hover{background:#1d4fd8}
-  .btn.danger{color:var(--red);border-color:#f2d5d5}
-  .btn.danger:hover{background:#fdf2f2}
-  .btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
-  .row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
-
-  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:6px}
-  .metric{background:#fbfcfe;border:1px solid var(--line);border-radius:11px;padding:11px 12px}
-  .metric .k{font-size:11px;color:var(--ink2)}
-  .metric .v{font-size:19px;font-weight:650;letter-spacing:-.3px;margin-top:2px}
-  .metric .v.ok{color:var(--green)} .metric .v.bad{color:var(--red)}
-
+  /* 运行日志 */
   .logs{margin-top:8px;height:250px;overflow:auto;background:#0f1116;border-radius:11px;padding:11px 12px;
     font:12px/1.65 ui-monospace,Consolas,monospace;color:#c9d1e0}
   .logs .l{white-space:pre-wrap;word-break:break-word}
   .logs .t{color:#5d6a80}
   .lv-OK{color:#54d68a} .lv-ERROR{color:#ff7b7b} .lv-WARN{color:#f0c268} .lv-INFO{color:#9fb0cc}
 
-  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink2)}
-  .dot{width:7px;height:7px;border-radius:50%;background:#c3c9d6;transition:background .3s;flex:none}
-  .dot.on{background:var(--green);box-shadow:0 0 0 4px rgba(18,161,80,.12)}
-  .dot.run{background:var(--blue);box-shadow:0 0 0 4px rgba(37,99,235,.14);animation:pulse 1.6s infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
-
   .bar{height:5px;background:#eceff5;border-radius:4px;overflow:hidden;margin-top:12px}
   .bar>i{display:block;height:100%;width:0;background:var(--blue);border-radius:4px;transition:width .5s var(--ease)}
-
-  .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(16px);
-    background:#17181b;color:#fff;padding:10px 16px;border-radius:11px;font-size:13px;
-    opacity:0;pointer-events:none;transition:opacity .3s var(--ease),transform .3s var(--ease);z-index:99}
-  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-  .warn{background:#fffbf0;border:1px solid #f0dfb8;color:#7a5a10;border-radius:10px;padding:10px 12px;font-size:12px;margin-top:10px}
-  .note{background:var(--blue-soft);border:1px solid #d8e3ff;color:#1e40af;border-radius:10px;padding:9px 12px;font-size:12px;margin-top:10px}
-  .full{grid-column:1/-1}
-  .preview{max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:8px;font-size:12px}
-  .preview table{width:100%;border-collapse:collapse}
-  .preview th,.preview td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
-  .preview th{background:#fbfcfe;color:var(--ink2);font-weight:600;position:sticky;top:0}
-  .preview td.txt{white-space:normal;max-width:420px}
 </style>
+
 </head>
 <body>
 <div class="wrap">
@@ -156,7 +96,7 @@
       <h2>1 · 账号与目标</h2>
       <p class="hint">自动读取本机所有已登录过的微信账号</p>
 
-      <label>微信账号</label>
+      <label for="accountSel">微信账号</label>
       <select id="accountSel"><option value="">读取中…</option></select>
 
       <div class="warn" id="accWarn" style="display:none"></div>
@@ -169,7 +109,7 @@
         </button>
         <div class="msel-panel" id="mselPanel">
           <div class="msel-tools">
-            <input class="msel-search" id="mselSearch" placeholder="搜索名称…">
+            <input class="msel-search" id="mselSearch" placeholder="搜索名称…" aria-label="搜索群聊或好友名称">
             <button class="btn" id="selAllGroups" type="button">全选群</button>
             <button class="btn" id="selNone" type="button">清空</button>
           </div>
@@ -199,7 +139,7 @@
         </button>
       </div>
 
-      <textarea id="msgBox" placeholder="在这里输入要发送的消息…"></textarea>
+      <textarea id="msgBox" placeholder="在这里输入要发送的消息…" aria-label="消息内容编辑区"></textarea>
       <div class="row" style="margin-top:10px">
         <button class="btn" id="saveMsgs" type="button">保存到 messages.txt</button>
         <button class="btn" id="reloadMsgs" type="button">重新读取</button>
@@ -230,8 +170,8 @@
       </div>
 
       <div id="mediaFolderRow" style="display:none;margin-top:10px">
-        <label class="lbl">素材文件夹</label>
-        <input id="mediaFolder" type="text" placeholder="例如 D:\素材\图片">
+        <label class="lbl" for="mediaFolder">素材文件夹</label>
+      <input id="mediaFolder" type="text" placeholder="例如 D:\素材\图片">
         <label class="chk" style="margin-top:8px">
           <input type="checkbox" id="mediaOnlyImages" checked>
           <span>只发图片（取消勾选则目录里允许的文件都会发）</span>
@@ -239,8 +179,8 @@
       </div>
 
       <div id="mediaListRow" style="display:none;margin-top:10px">
-        <label class="lbl">路径列表文件（每行一个绝对路径）</label>
-        <input id="mediaListFile" type="text" placeholder="例如 D:\素材\paths.txt">
+        <label class="lbl" for="mediaListFile">路径列表文件（每行一个绝对路径）</label>
+      <input id="mediaListFile" type="text" placeholder="例如 D:\素材\paths.txt">
       </div>
 
       <div id="mediaPickedRow" style="display:none;margin-top:10px">
@@ -254,13 +194,13 @@
       </div>
 
       <div class="row" style="margin-top:12px">
-        <label class="lbl" style="margin:0">素材与文字顺序</label>
-        <select id="mediaFirst">
+        <label class="lbl" style="margin:0" for="mediaFirst">素材与文字顺序</label>
+      <select id="mediaFirst">
           <option value="1" selected>先发素材，再发文字</option>
           <option value="0">先发文字，再发素材</option>
         </select>
-        <label class="lbl" style="margin:0 0 0 12px">分配方式</label>
-        <select id="mediaAssign">
+        <label class="lbl" style="margin:0 0 0 12px" for="mediaAssign">分配方式</label>
+      <select id="mediaAssign">
           <option value="rotate" selected>轮流取（每个目标不同）</option>
           <option value="shuffle">打乱后轮流（当天可复现）</option>
           <option value="same">每个目标都发全部</option>
@@ -286,12 +226,12 @@
 
       <div id="campaignBox" style="display:none">
         <div class="row">
-          <label class="lbl" style="margin:0">每天起始时间</label>
-          <input id="startAt" type="time" value="20:00" style="width:130px">
-          <label class="lbl" style="margin:0 0 0 14px">钩子延迟（分钟）</label>
-          <input id="hookDelay" type="number" min="0" step="5" value="30" style="width:90px">
-          <label class="lbl" style="margin:0 0 0 14px">每群每周上限</label>
-          <input id="weeklyCap" type="number" min="0" step="1" value="0" style="width:90px">
+          <label class="lbl" style="margin:0" for="startAt">每天起始时间</label>
+      <input id="startAt" type="time" value="20:00" style="width:130px">
+          <label class="lbl" style="margin:0 0 0 14px" for="hookDelay">钩子延迟（分钟）</label>
+      <input id="hookDelay" type="number" min="0" step="5" value="30" style="width:90px">
+          <label class="lbl" style="margin:0 0 0 14px" for="weeklyCap">每群每周上限</label>
+      <input id="weeklyCap" type="number" min="0" step="1" value="0" style="width:90px">
           <span class="pill" id="weekInfo">–</span>
         </div>
 
@@ -319,20 +259,20 @@
         间隔是<b>相邻两条消息之间</b>的随机等待（均约 5 分钟，30 个目标 ≈ 2.5 小时）</p>
       <div class="row" style="gap:12px">
         <div style="flex:1;min-width:90px">
-          <label style="margin-top:0">轮数</label>
-          <input type="number" id="rounds" value="1" min="1" max="50">
+          <label style="margin-top:0" for="rounds">轮数</label>
+      <input type="number" id="rounds" value="1" min="1" max="50">
         </div>
         <div style="flex:1;min-width:110px">
-          <label style="margin-top:0">每轮条数（0=跟随目标数）</label>
-          <input type="number" id="perRound" value="0" min="0" max="200">
+          <label style="margin-top:0" for="perRound">每轮条数（0=跟随目标数）</label>
+      <input type="number" id="perRound" value="0" min="0" max="200">
         </div>
         <div style="flex:1;min-width:100px">
-          <label style="margin-top:0">每条间隔下限(分)</label>
-          <input type="number" id="iMin" value="4" step="0.5" min="0.1">
+          <label style="margin-top:0" for="iMin">每条间隔下限(分)</label>
+      <input type="number" id="iMin" value="4" step="0.5" min="0.1">
         </div>
         <div style="flex:1;min-width:100px">
-          <label style="margin-top:0">每条间隔上限(分)</label>
-          <input type="number" id="iMax" value="6" step="0.5" min="0.1">
+          <label style="margin-top:0" for="iMax">每条间隔上限(分)</label>
+      <input type="number" id="iMax" value="6" step="0.5" min="0.1">
         </div>
       </div>
       <div class="row" style="margin-top:12px">
@@ -385,7 +325,7 @@
         <button class="btn" id="exportLeads" type="button">导出 CSV</button>
         <button class="btn" id="reloadReport" type="button">刷新周报</button>
         <button class="btn" id="testNotify" type="button">测试通知</button>
-        <select id="leadFilter" style="width:150px">
+        <select id="leadFilter" style="width:150px" aria-label="按跟进状态筛选线索">
           <option value="">全部线索</option>
           <option value="new">待筛选</option>
           <option value="material">已发资料</option>
@@ -415,50 +355,31 @@
     </section>
 
     <section class="card rise full" style="animation-delay:.26s">
-      <h2>6 · 设置</h2>
-      <p class="hint">全部设置集中在这里，按分组展示。改动直接写入本地
-        <code>data/settings.json</code>，非法值会被拒绝并告诉你原因。</p>
+      <h2>6 · 设置与运维</h2>
+      <p class="hint">全部设置已拆成独立页面，避免主界面越滚越长。
+        下面几个是最常用的状态入口，改参数请点「打开设置页」。</p>
 
-      <div class="row" style="margin-bottom:10px">
-        <button class="btn" id="reloadSettings" type="button">重新读取</button>
-        <button class="btn primary" id="saveSettings" type="button">保存全部改动</button>
-        <button class="btn" id="resetSettings" type="button">恢复默认值</button>
-        <button class="btn" id="cleanupNow" type="button">立即清理截图与日志</button>
-        <span class="pill" id="settingsMsg">–</span>
-      </div>
-
-      <div id="settingsBox"></div>
-
-      <h3 style="margin:18px 0 6px;font-size:13px">自动运行</h3>
-      <p class="hint" style="margin-top:0">把当前勾选的群/好友存成自动任务，
-        程序常驻时到点自动执行，不用每天手动点。</p>
-      <div class="row" style="margin-bottom:10px">
-        <button class="btn primary" id="saveAutoTargets" type="button">把当前选择存为自动任务</button>
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn primary" id="openSettings" type="button">打开设置页</button>
+        <button class="btn" id="saveAutoTargets" type="button">把当前选择存为自动任务</button>
         <button class="btn" id="autoRunNow" type="button">立刻跑一轮</button>
-        <button class="btn" id="autoResetDay" type="button">清「今天已跑」标记</button>
-        <button class="btn" id="reloadAuto" type="button">刷新状态</button>
+        <button class="btn" id="cleanupNow" type="button">清理截图与日志</button>
       </div>
+
       <div class="note" id="autoBox" style="display:block">–</div>
 
-      <div class="row" style="margin-top:10px">
+      <div class="row" style="margin-top:12px">
         <label class="chk" style="margin:0">
           <input type="checkbox" id="autostartChk">
           <span>开机自启（登录 Windows 后自动运行本程序）</span>
         </label>
         <span class="pill" id="autostartMsg">–</span>
       </div>
-      <div class="hint" style="margin-top:2px">自动运行要生效，程序得先在跑。
-        勾上这个才算真正无人值守——否则每天还得手动开一次程序。</div>
+      <p class="hint" style="margin:6px 0 0">自动运行要生效，程序得先在跑。
+        勾上这个才算真正无人值守——否则每天还得手动开一次程序。</p>
 
-      <h3 style="margin:18px 0 6px;font-size:13px">备份与恢复</h3>
-      <p class="hint" style="margin-top:0">把配置、文案、线索打成一个 zip。
-        恢复前会<b>自动快照当前状态</b>，恢复错了可以退回。</p>
-      <div class="row" style="margin-bottom:10px">
-        <button class="btn primary" id="backupNow" type="button">立即备份</button>
-        <button class="btn" id="reloadBackups" type="button">刷新备份列表</button>
-        <span class="pill" id="backupMsg">–</span>
-      </div>
-      <div class="preview" id="backupBox" style="display:none;margin-top:10px"></div>
+      <p class="hint" style="margin-top:12px">备份恢复、发送时段、限额、冷却、
+        关键词等全部在设置页里。</p>
     </section>
 
     <section class="card rise full" style="animation-delay:.28s">
@@ -472,30 +393,15 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="common.js"></script>
 <script>
-const $ = id => document.getElementById(id);
+'use strict';
+// $ / escapeHtml / toast / api / WCS / API_BASE / API_TOKEN / WEEKDAYS
+// 以及设置面板渲染（settingsField / renderSettings / collectSettings）
+// 都来自 common.js —— 主界面与设置页共用同一份，避免两处漂移。
+
 let state = { groups: [], friends: [], selected: new Map(), plan: null, polling: null,
   mediaSource: 'none', mediaPaths: [] };
-
-/* Electron 模式由 preload 注入 __WCS__（含服务端口与 token）；
-   浏览器模式（python backend/server.py）下 __WCS__ 不存在，走同源 + 不校验。 */
-const WCS = window.__WCS__ || null;
-const API_BASE = (WCS && WCS.baseUrl) ? WCS.baseUrl : '';
-const API_TOKEN = (WCS && WCS.token) ? WCS.token : '';
-
-function toast(msg){
-  const t = $('toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 2400);
-}
-async function api(path, opts){
-  opts = opts || {};
-  const headers = Object.assign({}, opts.headers || {});
-  if(API_TOKEN) headers['X-Token'] = API_TOKEN;
-  const r = await fetch(API_BASE + path, Object.assign({}, opts, {headers}));
-  const j = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
-  return j;
-}
 
 /* ---------- 账号 ---------- */
 async function loadAccounts(){
@@ -591,7 +497,6 @@ function itemHtml(x, kind){
   return `<label class="msel-item"><input type="checkbox" data-key="${key}" ${on}>
     <span class="nm">${nm}</span>${tag}</label>`;
 }
-function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 function renderChips(){
   const chips = $('chips');
@@ -744,8 +649,7 @@ function setMediaSource(src){
 }
 
 /* ---------- 内容编排 / 调度配置 ---------- */
-const WEEKDAYS = [['mon','周一'],['tue','周二'],['wed','周三'],['thu','周四'],
-                  ['fri','周五'],['sat','周六'],['sun','周日']];
+// WEEKDAYS 来自 common.js
 let scheduleCfg = { hook_days: ['tue','thu','sat'], start_at: '20:00',
                     hook_delay_minutes: 30, weekly_cap: 0 };
 
@@ -824,7 +728,6 @@ async function saveSchedule(){
     toast('调度配置已保存');
     // 2.7 与「6 · 设置」写的是同一份配置，保存后同步刷新设置面板，
     // 否则两处显示会不一致，用户会以为没存上
-    loadSettings().catch(()=>{});
   }catch(e){ toast('保存失败：'+e.message); }
 }
 
@@ -928,109 +831,23 @@ async function loadReport(){
   }catch(e){ /* 周报可选，失败不打扰 */ }
 }
 
-/* ---------- 设置面板 ---------- */
-let settingsSchema = [];   // 后端给的表单描述，保存时按它取类型
-
-function settingsField(s){
-  const id = 'set_' + s.key;
-  const help = s.help ? `<div class="k" style="margin-top:2px">${escapeHtml(s.help)}</div>` : '';
-  let ctl = '';
-  if(s.type === 'bool'){
-    ctl = `<label class="chk" style="margin:0">
-      <input type="checkbox" id="${id}" data-key="${s.key}" data-type="bool"
-        ${s.value ? 'checked' : ''}><span></span></label>`;
-  }else if(s.type === 'number'){
-    ctl = `<input type="number" id="${id}" data-key="${s.key}" data-type="number"
-      value="${s.value}" min="${s.min ?? ''}" max="${s.max ?? ''}"
-      step="${s.step ?? 'any'}" style="width:120px">`;
-  }else if(s.type === 'time'){
-    ctl = `<input type="time" id="${id}" data-key="${s.key}" data-type="time"
-      value="${s.value}" style="width:120px">`;
-  }else if(s.type === 'weekdays'){
-    const on = s.value || [];
-    ctl = WEEKDAYS.map(([k,cn])=>`<label class="chk" style="display:inline-flex;margin:0 6px 0 0">
-      <input type="checkbox" data-key="${s.key}" data-type="weekdays" data-day="${k}"
-        ${on.includes(k)?'checked':''}><span>${cn}</span></label>`).join('');
-  }else if(s.type === 'list'){
-    const txt = (s.value||[]).join('\n');
-    ctl = `<textarea id="${id}" data-key="${s.key}" data-type="list" rows="3"
-      style="width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);
-      border-radius:8px">${escapeHtml(txt)}</textarea>`;
-  }else{
-    ctl = `<input type="text" id="${id}" data-key="${s.key}" data-type="text"
-      value="${escapeHtml(String(s.value))}" style="width:180px">`;
-  }
-  return `<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;
-      border-top:1px solid #f1f3f7">
-    <div style="width:150px;flex:none;font-size:12px;color:#5b6274;padding-top:3px">
-      ${escapeHtml(s.label)}${help}</div>
-    <div style="flex:1">${ctl}</div></div>`;
-}
-
-function renderSettings(d){
-  settingsSchema = [];
-  (d.groups||[]).forEach(g=>g.items.forEach(s=>settingsSchema.push(s)));
-  $('settingsBox').innerHTML = (d.groups||[]).map(g=>`
-    <div style="margin-top:12px">
-      <div style="font-size:12px;font-weight:600;color:#1f2937;margin-bottom:4px">
-        ${escapeHtml(g.name)}</div>
-      ${g.items.map(settingsField).join('')}
-    </div>`).join('');
-  const n = settingsSchema.length;
-  $('settingsMsg').textContent = `共 ${n} 项设置`;
-}
-
-async function loadSettings(){
+/* ---------- 设置入口 ---------- */
+// 设置已拆成独立页面 settings.html。主界面只保留最常用的几个状态入口，
+// 具体参数改在设置页里做 —— 主界面因此不用再背着 30 项设置往下滚。
+async function openSettingsPage(){
   try{
-    renderSettings(await api('/api/settings'));
-  }catch(e){ toast('读取设置失败：'+e.message); }
-}
-
-function collectSettings(){
-  const patch = {};
-  document.querySelectorAll('#settingsBox [data-key]').forEach(el=>{
-    const key = el.dataset.key, type = el.dataset.type;
-    if(type === 'weekdays'){
-      if(!patch[key]) patch[key] = [];
-      if(el.checked) patch[key].push(el.dataset.day);
-    }else if(type === 'bool'){
-      patch[key] = el.checked;
-    }else if(type === 'number'){
-      if(el.value !== '') patch[key] = Number(el.value);
-    }else if(type === 'list'){
-      patch[key] = el.value.split('\n').map(x=>x.trim()).filter(Boolean);
-    }else{
-      patch[key] = el.value;
+    if(WCS && WCS.openSettings){
+      // Electron：主进程新开一个设置窗口（与主窗口共享 token）
+      await WCS.openSettings();
+      return;
     }
-  });
-  return patch;
+    // 浏览器模式：新标签页打开，同源所以能直接访问接口
+    const w = window.open('settings.html', 'wcs-settings',
+      'width=980,height=900,menubar=no,toolbar=no');
+    if(!w) toast('弹窗被拦了，请允许本站打开弹窗');
+  }catch(e){ toast('打开设置页失败：' + e.message); }
 }
 
-async function saveSettings(patch){
-  try{
-    const r = await api('/api/settings', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(patch)});
-    renderSettings(r);
-    toast('设置已保存');
-    await loadAuto();
-    return true;
-  }catch(e){
-    // 400 时后端会返回逐项原因，转成可读提示
-    const msg = (e && e.message) || '';
-    toast('保存失败：' + msg);
-    return false;
-  }
-}
-
-async function resetSettings(){
-  try{
-    renderSettings(await api('/api/settings/reset', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({})}));
-    toast('已恢复默认值');
-    await loadAuto();
-  }catch(e){ toast('恢复失败：'+e.message); }
-}
 
 async function cleanupNow(){
   try{
@@ -1080,14 +897,6 @@ async function autoRunNow(){
   }catch(e){ toast('启动失败：'+e.message); }
 }
 
-async function autoResetDay(){
-  try{
-    await api('/api/auto/reset-day', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body:'{}'});
-    toast('已清除「今天已跑」标记');
-    await loadAuto();
-  }catch(e){ toast('操作失败：'+e.message); }
-}
 
 /* 开机自启（走 Electron 原生 API，不是后端） */
 async function loadAutostart(){
@@ -1211,60 +1020,6 @@ async function clearFails(){
     toast(`已清理 ${r.cleared} 条已解决的记录`);
     await loadFails();
   }catch(e){ toast('清理失败：'+e.message); }
-}
-
-/* ---------- 备份与恢复 ---------- */
-async function loadBackups(){
-  try{
-    const d = await api('/api/backup');
-    const bs = d.backups || [];
-    $('backupMsg').textContent = `${bs.length} 个备份`;
-    const box = $('backupBox');
-    if(!bs.length){
-      box.style.display = 'block';
-      box.innerHTML = '<div class="hlp" style="padding:12px;color:#9aa1b2">'
-        + '还没有备份。点「立即备份」生成第一个。</div>';
-      return;
-    }
-    const rows = bs.map(b=>`<tr>
-      <td style="white-space:nowrap">${escapeHtml(b.at_text||'')}</td>
-      <td class="txt">${escapeHtml(b.name)}</td>
-      <td style="white-space:nowrap">${escapeHtml(b.size_text||'')}</td>
-      <td><button class="btn" data-path="${escapeHtml(b.path)}"
-        onclick="restoreBackup(this.dataset.path)">恢复</button></td>
-    </tr>`).join('');
-    box.style.display = 'block';
-    box.innerHTML = `<table><thead><tr><th>时间</th><th>文件</th><th>大小</th>
-      <th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
-  }catch(e){ toast('读取备份列表：'+e.message); }
-}
-
-async function backupNow(){
-  try{
-    const r = await api('/api/backup/export', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body:'{}'});
-    if(r.ok) toast(`已备份 ${r.count} 个文件（${r.size_text}）`);
-    else toast('备份失败：'+(r.error||''));
-    await loadBackups();
-  }catch(e){ toast('备份失败：'+e.message); }
-}
-
-async function restoreBackup(path){
-  if(!confirm('确定要用这个备份覆盖当前配置、文案和线索吗？\n\n恢复前会自动快照当前状态，可以退回。')) return;
-  try{
-    const r = await api('/api/backup/import', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({path})});
-    if(r.ok){
-      toast(`已恢复 ${r.count} 个文件${r.snapshot ? '，原状态已快照' : ''}`);
-      await loadBackups();
-      await loadSettings();
-      await loadCampaign();
-      await loadLeads();
-    }else{
-      toast('恢复失败：'+(r.error||''));
-    }
-  }catch(e){ toast('恢复失败：'+e.message); }
 }
 
 /* ---------- 群管理（降频/暂停） ---------- */
@@ -1658,11 +1413,10 @@ $('leadFilter').addEventListener('change', loadLeads);
 $('testNotify').addEventListener('click', testNotification);
 
 /* 设置面板 */
-$('reloadSettings').addEventListener('click', loadSettings);
-$('saveSettings').addEventListener('click', ()=>saveSettings(collectSettings()));
-$('resetSettings').addEventListener('click', resetSettings);
 $('cleanupNow').addEventListener('click', cleanupNow);
 $('runDoctor').addEventListener('click', runDoctor);
+
+$('openSettings').addEventListener('click', openSettingsPage);
 
 /* 失败补发 */
 $('reloadFails').addEventListener('click', loadFails);
@@ -1670,18 +1424,14 @@ $('retryFails').addEventListener('click', retryFails);
 $('clearFails').addEventListener('click', clearFails);
 
 /* 备份与恢复 */
-$('backupNow').addEventListener('click', backupNow);
-$('reloadBackups').addEventListener('click', loadBackups);
 
 /* 群管理 */
 $('reloadTargets').addEventListener('click', loadTargets);
 $('applyCuts').addEventListener('click', applyCuts);
 
 /* 自动运行 */
-$('reloadAuto').addEventListener('click', loadAuto);
 $('saveAutoTargets').addEventListener('click', saveAutoTargets);
 $('autoRunNow').addEventListener('click', autoRunNow);
-$('autoResetDay').addEventListener('click', autoResetDay);
 $('autostartChk').addEventListener('change', toggleAutostart);
 
 /* ---------- 启动 ---------- */
@@ -1707,11 +1457,9 @@ async function loadPaths(){
     // 线索与周报是可选模块，失败不应影响主流程
     loadLeads().catch(()=>{});
     loadReport().catch(()=>{});
-    loadSettings().catch(()=>{});
     loadAuto().catch(()=>{});
     loadAutostart().catch(()=>{});
     loadFails().catch(()=>{});
-    loadBackups().catch(()=>{});
     loadTargets().catch(()=>{});
     // 新线索通知轮询（间隔由后端设置决定，改设置后下一轮自动生效）
     scheduleNotify(8000);

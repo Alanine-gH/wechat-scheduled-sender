@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 与主界面同一套 CSP：拆页不能成为放松安全约束的理由。
+     只允许连本地服务；界面内联样式/脚本因此放行 inline。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'">
+<title>设置 · 微信定时群发控制台</title>
+<!-- 内联空 favicon：否则浏览器每次都会去请求 /favicon.ico 并报 404，
+     在控制台留下一条红色错误，排查真问题时容易误导 -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%232563eb'/></svg>">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* 设置页专用样式（只此一页用，所以留在本页） */
+  .wrap{max-width:900px;margin:0 auto;padding:26px 22px 40px}
+
+  /* 顶部粘性操作条。
+     不用 position:fixed —— 在长页面里它会一直压住内容，整页截图时还会
+     错位到页面中部（实测）。sticky 跟随文档流，滚到顶就吸附，行为确定。 */
+  .phead{position:sticky;top:0;z-index:30;
+    background:rgba(247,248,250,.96);backdrop-filter:blur(8px);
+    padding:14px 0 12px;margin-bottom:6px;
+    border-bottom:1px solid var(--line)}
+  .phead h1{font-size:22px;margin:0 0 4px;letter-spacing:-.3px}
+  .phead .sub{color:var(--ink2);font-size:12.5px;margin:0}
+  .phead .bar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  .phead .bar .pill{margin-left:auto}
+
+  /* 设置分组：每组一张卡 */
+  .sgroup{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+    border-radius:var(--radius);padding:14px 16px 10px;box-shadow:var(--shadow);
+    animation:rise .5s var(--ease) both}
+  .sgtitle{font-size:12.5px;font-weight:650;color:#1f2937;letter-spacing:.3px;
+    padding-bottom:6px;border-bottom:1px solid #f1f3f7;margin-bottom:4px}
+  .srow{display:flex;align-items:flex-start;gap:14px;padding:9px 0;border-bottom:1px solid #f7f8fb}
+  .srow:last-child{border-bottom:0}
+  .slabel{width:172px;flex:none;font-size:12px;color:var(--ink2);padding-top:5px}
+  .slabel .k{font-size:11px;color:#9aa1b2;line-height:1.5;margin-top:2px}
+  .sctl{flex:1;min-width:0}
+
+  /* 小屏：标签换行到控件上方，避免挤压 */
+  @media(max-width:720px){
+    .srow{flex-direction:column;gap:2px}
+    .slabel{width:auto;padding-top:0}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="phead">
+    <h1>设置</h1>
+    <p class="sub">全部设置集中在这里。改动直接写入本地
+      <code>data/settings.json</code>，非法值会被拒绝并说明原因。</p>
+    <div class="bar">
+      <button class="btn primary" id="saveSettings" type="button">保存全部改动</button>
+      <button class="btn" id="reloadSettings" type="button">重新读取</button>
+      <button class="btn" id="resetSettings" type="button">恢复默认值</button>
+      <button class="btn ghost" id="closeBtn" type="button" title="关闭设置页">关闭</button>
+      <span class="pill" id="settingsMsg">–</span>
+    </div>
+  </div>
+
+  <div id="settingsBox">
+    <div class="hint">读取中…</div>
+  </div>
+
+  <h2 style="font-size:14px;margin:26px 0 6px;font-weight:600">自动运行</h2>
+  <p class="hint" style="margin-top:0">把主界面勾选的群/好友存成自动任务，
+    程序常驻时到点自动执行，不用每天手动点。</p>
+
+  <div class="card rise" style="animation-delay:.1s">
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn primary" id="saveAutoTargets" type="button">把主界面的选择存为自动任务</button>
+      <button class="btn" id="autoRunNow" type="button">立刻跑一轮</button>
+      <button class="btn" id="autoResetDay" type="button">清「今天已跑」标记</button>
+      <button class="btn" id="reloadAuto" type="button">刷新状态</button>
+    </div>
+    <div class="note" id="autoBox" style="display:block">–</div>
+
+    <div class="row" style="margin-top:12px">
+      <label class="chk" style="margin:0">
+        <input type="checkbox" id="autostartChk">
+        <span>开机自启（登录 Windows 后自动运行本程序）</span>
+      </label>
+      <span class="pill" id="autostartMsg">–</span>
+    </div>
+    <p class="hint" style="margin:6px 0 0">自动运行要生效，程序得先在跑。
+      勾上这个才算真正无人值守——否则每天还得手动开一次程序。</p>
+  </div>
+
+  <h2 style="font-size:14px;margin:26px 0 6px;font-weight:600">备份与恢复</h2>
+  <p class="hint" style="margin-top:0">把配置、文案、线索打成一个 zip。
+    恢复前会<b>自动快照当前状态</b>，恢复错了可以退回。</p>
+
+  <div class="card rise" style="animation-delay:.15s">
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn primary" id="backupNow" type="button">立即备份</button>
+      <button class="btn" id="reloadBackups" type="button">刷新备份列表</button>
+      <button class="btn" id="cleanupNow" type="button">立即清理截图与日志</button>
+      <span class="pill" id="backupMsg">–</span>
+    </div>
+    <div class="preview" id="backupBox" style="display:none"></div>
+  </div>
+
+  <div style="margin-top:28px"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="common.js"></script>
+<script>
+'use strict';
+
+/* ---------- 设置 ---------- */
+async function loadSettings(){
+  try{
+    await loadSettingsInto();
+  }catch(e){
+    const box = $('settingsBox');
+    box.innerHTML = `<div class="warn" style="display:block">读取设置失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function saveAll(){
+  try{
+    await saveSettingsPatch(collectSettings());
+    toast('设置已保存');
+    await loadAuto();
+  }catch(e){
+    toast('保存失败：' + e.message);
+  }
+}
+
+async function resetAll(){
+  if(!confirm('把所有设置恢复成默认值？\n\n（内容编排用的 campaign.txt 不受影响）')) return;
+  try{
+    const r = await api('/api/settings/reset', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    renderSettings(r);
+    toast('已恢复默认值');
+    await loadAuto();
+  }catch(e){ toast('恢复失败：' + e.message); }
+}
+
+/* ---------- 自动运行 ---------- */
+async function loadAuto(){
+  try{
+    const a = await api('/api/auto');
+    const on = a.enabled ? '已启用' : '未启用';
+    const names = (a.targets || []).map(t => t.name).join('、') || '（还没保存）';
+    $('autoBox').innerHTML =
+      `<b>自动运行：${on}</b>　目标 ${a.targets.length} 个：${escapeHtml(names)}<br>`
+      + `触发时间 ${escapeHtml(a.start_at || '')}　补跑宽限 ${a.grace_minutes ?? '–'} 分钟　`
+      + `上次执行 ${a.last_run_day ? escapeHtml(a.last_run_day) : '（无）'}<br>`
+      + `当前判断：${escapeHtml(a.reason || '')}`
+      + (a.last_error ? `<br><span style="color:#b54708">上次错误：${escapeHtml(a.last_error)}</span>` : '');
+  }catch(e){ $('autoBox').textContent = '读取自动运行状态失败：' + e.message; }
+}
+
+/* 自动任务的目标名单由主界面决定（它才知道勾了哪些群/好友）。
+   设置页只能查看当前已保存的名单，不能凭空改 —— 那样会猜错目标。 */
+async function saveAutoTargets(){
+  try{
+    const cur = await api('/api/auto');
+    const saved = cur.targets || [];
+    if(!saved.length){
+      toast('还没保存过目标：请回主界面勾选群/好友，再点主界面的「存为自动任务」');
+      return;
+    }
+    toast(`当前自动任务已有 ${saved.length} 个目标：`
+          + saved.map(t => t.name).join('、'));
+  }catch(e){ toast('读取失败：' + e.message); }
+}
+
+async function autoRunNow(){
+  try{
+    await api('/api/auto/run-now', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast('已启动一轮自动任务，回主界面看运行日志');
+    await loadAuto();
+  }catch(e){ toast('启动失败：' + e.message); }
+}
+
+async function autoResetDay(){
+  try{
+    await api('/api/auto/reset-day', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast('已清除「今天已跑」标记');
+    await loadAuto();
+  }catch(e){ toast('操作失败：' + e.message); }
+}
+
+/* ---------- 开机自启 ---------- */
+async function loadAutostart(){
+  const chk = $('autostartChk'), msg = $('autostartMsg');
+  if(!WCS || !WCS.getAutostart){
+    chk.disabled = true;
+    msg.textContent = '浏览器模式不支持（需安装版）';
+    return;
+  }
+  try{
+    const r = await WCS.getAutostart();
+    if(r.ok){
+      chk.checked = !!r.on;
+      chk.disabled = !r.packaged;
+      msg.textContent = r.packaged ? (r.on ? '已开启' : '未开启') : '开发模式不可用';
+    }else{
+      msg.textContent = '读取失败';
+    }
+  }catch(e){ msg.textContent = '读取失败：' + e.message; }
+}
+
+async function toggleAutostart(){
+  if(!WCS || !WCS.setAutostart) return;
+  const chk = $('autostartChk'), msg = $('autostartMsg');
+  try{
+    const r = await WCS.setAutostart(chk.checked);
+    if(r.ok){
+      chk.checked = !!r.on;
+      msg.textContent = r.on ? '已开启' : '未开启';
+      toast(r.on ? '已设置开机自启' : '已取消开机自启');
+    }else{
+      chk.checked = !chk.checked;
+      msg.textContent = '设置失败';
+      toast(r.error || '设置失败');
+    }
+  }catch(e){
+    chk.checked = !chk.checked;
+    msg.textContent = '设置失败';
+    toast('设置失败：' + e.message);
+  }
+}
+
+/* ---------- 备份 ---------- */
+async function loadBackups(){
+  try{
+    const d = await api('/api/backup');
+    const bs = d.backups || [];
+    $('backupMsg').textContent = `${bs.length} 个备份`;
+    const box = $('backupBox');
+    if(!bs.length){
+      box.style.display = 'block';
+      box.innerHTML = '<div style="padding:12px;color:#9aa1b2">还没有备份。点「立即备份」生成第一个。</div>';
+      return;
+    }
+    const rows = bs.map(b => `<tr>
+      <td style="white-space:nowrap">${escapeHtml(b.at_text || '')}</td>
+      <td class="txt">${escapeHtml(b.name)}</td>
+      <td style="white-space:nowrap">${escapeHtml(b.size_text || '')}</td>
+      <td><button class="btn" data-path="${escapeHtml(b.path)}"
+        onclick="restoreBackup(this.dataset.path)">恢复</button></td>
+    </tr>`).join('');
+    box.style.display = 'block';
+    box.innerHTML = `<table><thead><tr><th>时间</th><th>文件</th><th>大小</th>
+      <th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }catch(e){ toast('读取备份列表：' + e.message); }
+}
+
+async function backupNow(){
+  try{
+    const r = await api('/api/backup/export', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    if(r.ok) toast(`已备份 ${r.count} 个文件（${r.size_text}）`);
+    else toast('备份失败：' + (r.error || ''));
+    await loadBackups();
+  }catch(e){ toast('备份失败：' + e.message); }
+}
+
+async function restoreBackup(path){
+  if(!confirm('确定要用这个备份覆盖当前配置、文案和线索吗？\n\n恢复前会自动快照当前状态，可以退回。')) return;
+  try{
+    const r = await api('/api/backup/import', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path})});
+    if(r.ok){
+      toast(`已恢复 ${r.count} 个文件${r.snapshot ? '，原状态已快照' : ''}`);
+      await loadBackups();
+      await loadSettings();
+    }else{
+      toast('恢复失败：' + (r.error || ''));
+    }
+  }catch(e){ toast('恢复失败：' + e.message); }
+}
+
+async function cleanupNow(){
+  try{
+    const r = await api('/api/cleanup', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    const f = (r.shots && r.shots.files) || 0;
+    const mb = ((r.shots && r.shots.bytes) || 0) / 1048576;
+    const d = (r.logs && r.logs.dropped) || 0;
+    toast(`清理完成：回收截图 ${f} 个（${mb.toFixed(2)} MB），清理日志 ${d} 条`);
+  }catch(e){ toast('清理失败：' + e.message); }
+}
+
+/* ---------- 关闭 ---------- */
+function closePage(){
+  // Electron 里由主进程关窗；浏览器模式用 window.close（同源可关）
+  if(WCS && WCS.closeSettings){
+    WCS.closeSettings();
+    return;
+  }
+  window.close();
+  // 某些浏览器不允许脚本关闭非脚本打开的窗口，给个退路提示
+  setTimeout(() => { toast('如果窗口没关掉，请直接点右上角 ×'); }, 300);
+}
+
+/* ---------- 绑定 ---------- */
+$('reloadSettings').addEventListener('click', loadSettings);
+$('saveSettings').addEventListener('click', saveAll);
+$('resetSettings').addEventListener('click', resetAll);
+$('closeBtn').addEventListener('click', closePage);
+
+$('reloadAuto').addEventListener('click', loadAuto);
+$('saveAutoTargets').addEventListener('click', saveAutoTargets);
+$('autoRunNow').addEventListener('click', autoRunNow);
+$('autoResetDay').addEventListener('click', autoResetDay);
+$('autostartChk').addEventListener('change', toggleAutostart);
+
+$('backupNow').addEventListener('click', backupNow);
+$('reloadBackups').addEventListener('click', loadBackups);
+$('cleanupNow').addEventListener('click', cleanupNow);
+
+/* Ctrl+S 保存 */
+document.addEventListener('keydown', e => {
+  if((e.ctrlKey || e.metaKey) && e.key === 's'){
+    e.preventDefault();
+    saveAll();
+  }
+});
+
+/* ---------- 启动 ---------- */
+(async () => {
+  await loadSettings();
+  await loadAuto();
+  await loadAutostart();
+  await loadBackups();
+  console.log('[wcs] 设置页就绪');
+})();
+</script>
+</body>
+</html>

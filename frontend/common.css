@@ -1,0 +1,95 @@
+/* ===========================================================================
+ *  公共样式：主界面（index.html）与设置页（settings.html）共用
+ *  ---------------------------------------------------------------------------
+ *  为什么单独抽一个文件：设置页拆出去之后，两个页面需要同一套按钮、卡片、
+ *  表单、toast、表格样式。复制两份迟早会漂移（改了一处忘另一处），
+ *  所以把「两页都要用」的部分放这里，各自的专用样式留在各页内。
+ *
+ *  改动约定：只往里放**两个页面都确实用到**的规则。
+ *  只有一处用的样式请留在对应页面的 <style> 里，否则这个文件会变成垃圾桶。
+ * =========================================================================== */
+
+:root{
+  --bg:#f7f8fa; --panel:#ffffff; --ink:#17181b; --ink2:#5b6070; --line:#e6e8ee;
+  --blue:#2563eb; --blue-soft:#eef3ff; --green:#12a150; --red:#d94040;
+  --radius:14px; --shadow:0 1px 2px rgba(16,24,40,.04),0 8px 24px rgba(16,24,40,.06);
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}
+
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+.rise{animation:rise .55s var(--ease) both}
+
+/* ---- 卡片 ---- */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:18px 18px 16px;box-shadow:var(--shadow);
+  transition:box-shadow .3s var(--ease),transform .3s var(--ease),border-color .3s}
+.card:hover{box-shadow:0 2px 6px rgba(16,24,40,.06),0 14px 36px rgba(16,24,40,.09)}
+.card h2{font-size:14px;margin:0 0 4px;font-weight:600;letter-spacing:.2px}
+.card h3{font-size:13px;margin:18px 0 6px;font-weight:600}
+.hint{color:var(--ink2);font-size:12px;margin:0 0 12px}
+.full{grid-column:1/-1}
+
+/* ---- 表单 ---- */
+label{display:block;font-size:12px;color:var(--ink2);margin:12px 0 6px}
+select,input[type=number],input[type=time],input[type=text],textarea{
+  width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:10px;
+  background:#fff;font:inherit;color:var(--ink);outline:none;
+  transition:border-color .2s,box-shadow .2s}
+select:focus,input:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft)}
+textarea{min-height:120px;resize:vertical;line-height:1.55;font-family:inherit}
+.chk{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink);
+  cursor:pointer;margin:6px 0}
+.chk input{width:15px;height:15px;accent-color:var(--blue);cursor:pointer;flex:none;margin:0}
+
+/* ---- 按钮 ---- */
+.btn{padding:9px 15px;border-radius:10px;border:1px solid var(--line);background:#fff;font:inherit;cursor:pointer;
+  transition:transform .14s var(--ease),background .2s,border-color .2s,box-shadow .2s}
+.btn:hover{border-color:#cfd5e3;background:#fbfcfe}
+.btn:active{transform:scale(.975)}
+.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}
+.btn.primary:hover{background:#1d4fd8}
+.btn.danger{color:var(--red);border-color:#f2d5d5}
+.btn.danger:hover{background:#fdf2f2}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn.ghost{background:transparent}
+.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+
+/* ---- 指标 ---- */
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:6px}
+.metric{background:#fbfcfe;border:1px solid var(--line);border-radius:11px;padding:11px 12px}
+.metric .k{font-size:11px;color:var(--ink2)}
+.metric .v{font-size:19px;font-weight:650;letter-spacing:-.3px;margin-top:2px}
+.metric .v.ok{color:var(--green)} .metric .v.bad{color:var(--red)}
+
+/* ---- 状态点 / 标签 ---- */
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink2)}
+.dot{width:7px;height:7px;border-radius:50%;background:#c3c9d6;transition:background .3s;flex:none}
+.dot.on{background:var(--green);box-shadow:0 0 0 4px rgba(18,161,80,.12)}
+.dot.run{background:var(--blue);box-shadow:0 0 0 4px rgba(37,99,235,.14);animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+/* ---- 提示条 ---- */
+.warn{background:#fffbf0;border:1px solid #f0dfb8;color:#7a5a10;border-radius:10px;
+  padding:10px 12px;font-size:12px;margin-top:10px}
+.note{background:var(--blue-soft);border:1px solid #d8e3ff;color:#1e40af;border-radius:10px;
+  padding:9px 12px;font-size:12px;margin-top:10px}
+
+/* ---- 预览表 ---- */
+.preview{max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:10px;
+  margin-top:8px;font-size:12px}
+.preview table{width:100%;border-collapse:collapse}
+.preview th,.preview td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);
+  white-space:nowrap}
+.preview th{background:#fbfcfe;color:var(--ink2);font-weight:600;position:sticky;top:0}
+.preview td.txt{white-space:normal;max-width:420px}
+
+/* ---- toast ---- */
+.toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(16px);
+  background:#17181b;color:#fff;padding:10px 16px;border-radius:11px;font-size:13px;
+  opacity:0;pointer-events:none;transition:opacity .3s var(--ease),transform .3s var(--ease);z-index:99}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}

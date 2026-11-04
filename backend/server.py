@@ -720,6 +720,21 @@ class Handler(BaseHTTPRequestHandler):
             if p in ("/", "/index.html"):
                 return self._file(os.path.join(FRONTEND_DIR, "index.html"),
                                   "text/html; charset=utf-8")
+            # 前端静态资源（设置页拆出去后需要：settings.html / common.css / common.js）
+            # 只放行 frontend/ 下这几种扩展名，且拒绝任何带 .. 的路径 ——
+            # 简单白名单比「按路径拼接再信任」安全得多。
+            if p.startswith("/") and not p.startswith("/api/") \
+                    and not p.startswith("/shots/"):
+                rel = p.lstrip("/")
+                if rel and ".." not in rel and "/" not in rel:
+                    name, ext = os.path.splitext(rel)
+                    ctype = {".html": "text/html; charset=utf-8",
+                             ".css": "text/css; charset=utf-8",
+                             ".js": "application/javascript; charset=utf-8"}.get(ext.lower())
+                    if ctype:
+                        full = os.path.join(FRONTEND_DIR, rel)
+                        if os.path.isfile(full):
+                            return self._file(full, ctype)
             if p == "/api/paths":
                 return self._json(userdata.describe())
             if p == "/api/accounts":
