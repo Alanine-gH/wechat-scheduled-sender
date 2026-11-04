@@ -2,15 +2,24 @@
 """账号与联系人枚举：自动发现本机所有微信账号，并列出该账号下的群聊与好友。
 
 关键实现要点（均经实测确认）：
-- 群聊用 ``db.get_groups()``（读 chat_room 表，含已退出的群，比 contact 表更全）
-- 好友用 ``db._contact_conn()`` 直接查 contact.db，**必须带 local_type=3**
-  （仅按 username 后缀过滤会混入系统号/公众号）
-- 群与好友靠 local_type（2=群 / 3=好友）+ username 后缀双信号区分，两者零冲突
+- 群聊**自己查** chat_room / chatroom_member / contact（见 list_groups）。
+  为什么不走第三方库的 ``db.get_groups()``：它内部用
+  ``WHERE room_id IN (…)``（占位符数 = 群数）和 ``WHERE id IN (…)``
+  （占位符数 = **全部群成员总数**）。成员总数一旦超过 SQLite 参数上限
+  （老版本 999 / 新版 32766），直接报 ``too many SQL variables``，
+  界面表现就是「读取失败：too many SQL variables」。
+  测试机 29 个群约 1.3 万成员没触发；用户机器群多、成员多就炸了。
+- 好友用 ``db._contact_conn()`` 直接查 contact.db，**必须带 local_type=1**
+  （仅按 username 后缀过滤会混入系统号/公众号）。
+- 群与好友靠 local_type（2=群 / 3=好友成员）+ username 后缀双信号区分，两者零冲突。
+  （注意：群里能看到但没加好友的人 local_type=3；真实好友是 local_type=1，
+  与微信「通讯录」界面一致 —— 见下方 _FRIEND_SQL 的注释。）
 """
 from __future__ import annotations
 
+import sqlite3
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 # 好友查询：微信「通讯录」里的真实好友 = local_type=1，排除群/公众号/企微/自己。
 #
@@ -46,6 +55,101 @@ _SYSTEM_ACCOUNTS = {
 
 _lock = threading.Lock()
 _db_cache: Dict[str, Any] = {}
+
+# SQLite 参数上限：老版本 999，3.32+ 是 32766。按 900 分批，两头都安全。
+_CHUNK = 900
+
+
+def _query_in(conn: sqlite3.Connection, sql: str, ids: Iterable[int]) -> list:
+    """分批执行 ``… WHERE id IN (%s)`` 查询。
+
+    ids 数量再多也不会触发 ``too many SQL variables``。
+    sql 里必须正好有一个 ``%s`` 占位符用来填 ``?,?…``。
+    """
+    out: list = []
+    ids = list(ids)
+    for i in range(0, len(ids), _CHUNK):
+        part = ids[i:i + _CHUNK]
+        if not part:
+            continue
+        ph = ",".join("?" * len(part))
+        out.extend(conn.execute(sql % ph, tuple(part)).fetchall())
+    return out
+
+
+def _enumerate_groups(conn: sqlite3.Connection, with_members: bool = False) -> List[Dict[str, Any]]:
+    """枚举全部群聊。conn 是已解密的 contact.db 连接（row_factory=Row）。
+
+    设计：
+    - 成员**计数**用 GROUP BY，一次查询拿所有群的成员数，完全不碰 IN；
+    - 成员**详情**（只有 with_members=True 才查）先拉全量 room_id/member_id
+      映射（无 IN），再对去重后的成员 id 按 900 一批分片查 contact。
+    这样群再多、成员再多都不会撞参数上限。
+    """
+    rooms = conn.execute("SELECT id, username, owner FROM chat_room").fetchall()
+    room_names = {
+        r["username"]: (r["nick_name"] or r["username"])
+        for r in conn.execute(
+            "SELECT username, nick_name FROM contact "
+            "WHERE username LIKE '%@chatroom'").fetchall()
+    }
+    counts = {
+        int(r["room_id"]): int(r["n"])
+        for r in conn.execute(
+            "SELECT room_id, COUNT(*) AS n FROM chatroom_member GROUP BY room_id")
+    }
+
+    members_by_room: Dict[int, List[Dict[str, Any]]] = {}
+    if with_members:
+        all_members = conn.execute(
+            "SELECT room_id, member_id FROM chatroom_member").fetchall()
+        by_room: Dict[int, List[int]] = {}
+        for m in all_members:
+            by_room.setdefault(int(m["room_id"]), []).append(int(m["member_id"]))
+        contact = {
+            int(r["id"]): r
+            for r in _query_in(
+                conn,
+                "SELECT id, username, nick_name, remark FROM contact "
+                "WHERE id IN (%s)",
+                sorted({int(m["member_id"]) for m in all_members}),
+            )
+        }
+        room_owner = {int(r["id"]): (r["owner"] or "") for r in rooms}
+        for rid, ids in by_room.items():
+            owner = room_owner.get(rid, "")
+            lst: List[Dict[str, Any]] = []
+            for mid in ids:
+                c = contact.get(mid)
+                if c is None:
+                    continue
+                lst.append({
+                    "username": c["username"],
+                    "nick_name": c["nick_name"],
+                    "remark": c["remark"],
+                    "is_owner": c["username"] == owner,
+                })
+            members_by_room[rid] = lst
+
+    out: List[Dict[str, Any]] = []
+    for room in rooms:
+        rid = int(room["id"])
+        uname = room["username"] or ""
+        item: Dict[str, Any] = {
+            "kind": "group",
+            "username": uname,
+            "name": room_names.get(uname, uname),
+            "owner": room["owner"],
+            # 没要详情时用 GROUP BY 的真实成员数；要详情时以能对上 contact 的为准，
+            # 与旧实现（只数查得到资料的成员）保持一致。
+            "member_count": counts.get(rid, 0) if not with_members else len(
+                members_by_room.get(rid) or []),
+        }
+        if with_members:
+            item["members"] = members_by_room.get(rid) or []
+        out.append(item)
+    out.sort(key=lambda x: (-(x.get("member_count") or 0), x.get("name") or ""))
+    return out
 
 
 def _import_wechatauto():
@@ -98,24 +202,19 @@ def clear_cache() -> None:
 
 
 def list_groups(account: Optional[str] = None, with_members: bool = False) -> List[Dict[str, Any]]:
-    """列出该账号的全部群聊（读 chat_room 表，含很久没说话的群）。"""
+    """列出该账号的全部群聊（读 chat_room 表，含很久没说话的群）。
+
+    实现走 ``_enumerate_groups``，不用第三方库的 ``get_groups()``，
+    原因见模块头部说明（成员总数超 SQLite 参数上限会炸）。
+    """
     db = get_db(account)
-    groups = db.get_groups()
-    out: List[Dict[str, Any]] = []
-    for g in groups:
-        name = (g.get("name") or "").strip() or g.get("username") or ""
-        item = {
-            "kind": "group",
-            "username": g.get("username"),
-            "name": name,
-            "owner": g.get("owner"),
-            "member_count": g.get("member_count") or 0,
-        }
-        if with_members:
-            item["members"] = g.get("members") or []
-        out.append(item)
-    out.sort(key=lambda x: (-(x.get("member_count") or 0), x.get("name") or ""))
-    return out
+    conn = db._contact_conn()
+    if conn is None:
+        raise RuntimeError("无法打开 contact.db，请确认微信已登录且密钥可获取")
+    try:
+        return _enumerate_groups(conn, with_members=with_members)
+    finally:
+        conn.close()
 
 
 def list_friends(account: Optional[str] = None, limit: int = 0) -> List[Dict[str, Any]]:
