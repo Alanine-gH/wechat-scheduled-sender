@@ -140,6 +140,37 @@ def _check_uia() -> Dict[str, Any]:
                     "重启微信后重试；仍不行请把微信版本与本文档一起反馈"}
 
 
+def _check_wxdir(data_dir: str = "") -> Dict[str, Any]:
+    """微信数据目录定位（「读不到登录的微信」最常见的原因就在这一项）。"""
+    import wxdir
+    import settings as S
+
+    manual = ""
+    try:
+        manual = str(S.get(data_dir, "wechat_db_dir") or "") if data_dir else ""
+    except Exception:
+        manual = ""
+    d = wxdir.diagnose(manual)
+    if not d.get("db_dir"):
+        hint = "在「设置 → 微信连接」里填微信的文件目录（微信：设置 → 文件管理 可看到路径）"
+        if manual:
+            hint = ("手填的目录没找到账号数据，确认路径正确（填到哪一级都行，"
+                    "但目录里要有 xxx\\db_storage）；" + hint)
+        return {"status": ERROR, "detail": "未找到微信数据目录", "hint": hint}
+
+    accs = d.get("accounts") or []
+    if not accs:
+        return {"status": WARN,
+                "detail": "找到目录 %s（%s），但里面没有账号数据"
+                          % (d["db_dir"], d.get("source_cn") or ""),
+                "hint": "可能微信刚登录还没建库；或目录指到了空壳位置"}
+    return {"status": OK,
+            "detail": "%s（%s）· %d 个账号"
+                      % (d["db_dir"], d.get("source_cn") or "", len(accs)),
+            "cue": {"db_dir": d["db_dir"], "source": d.get("source"),
+                    "accounts": [a["account"] for a in accs]}}
+
+
 def _check_database(account: Optional[str] = None) -> Dict[str, Any]:
     import contacts as C
     db = C.get_db(account)
@@ -264,6 +295,7 @@ def run(data_dir: str, shot_dir: str, account: Optional[str] = None,
         _check("磁盘空间", lambda: _check_disk(data_dir)),
         _check("微信窗口", _check_wechat_window),
         _check("微信版本", _check_wechat_version),
+        _check("微信数据目录", lambda: _check_wxdir(data_dir)),
         _check("控件树", _check_uia),
         _check("本地数据库", lambda: _check_database(account)),
         _check("控件树缓存", _check_gate_cache),

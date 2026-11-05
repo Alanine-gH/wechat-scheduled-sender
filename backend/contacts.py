@@ -21,6 +21,8 @@ import sqlite3
 import threading
 from typing import Any, Dict, Iterable, List, Optional
 
+import wxdir
+
 # 好友查询：微信「通讯录」里的真实好友 = local_type=1，排除群/公众号/企微/自己。
 #
 # 实测依据（务必保留这段说明，避免后人再踩坑）：
@@ -162,13 +164,32 @@ def _import_wechatauto():
         )
 
 
+def _resolve_db_dir() -> Optional[str]:
+    """定位微信数据目录。
+
+    用自己的 wxdir（手动指定 > 库的自动探测 > 全盘常见目录扫描），
+    因为库自带的探测在「微信文件改到别的盘 / 绿色版 / 中文目录名」的机器上
+    找不到，用户看到的就是「读不到登录的微信」。
+    """
+    manual = ""
+    try:
+        import settings as _settings_mod       # 延迟导入，避免模块级循环依赖
+        manual = str(_settings_mod.get("wechat_db_dir") or "")
+    except Exception:
+        manual = ""
+    db_dir, _source = wxdir.resolve(manual)
+    return db_dir
+
+
 def list_local_accounts() -> List[Dict[str, Any]]:
     """枚举本机所有存在数据目录的微信账号。
 
     返回每项：account(目录名) / wxid / path / last_activity / is_current
     """
     _, list_accounts = _import_wechatauto()
-    raw = list_accounts()
+    db_dir = _resolve_db_dir()
+    # 把定位到的目录传给库，避免它自己再猜一次（它猜不到的那批机器正是问题所在）
+    raw = list_accounts(db_dir=db_dir) if db_dir else list_accounts()
     out: List[Dict[str, Any]] = []
     for item in raw:
         out.append({
@@ -181,6 +202,12 @@ def list_local_accounts() -> List[Dict[str, Any]]:
         newest = max(out, key=lambda x: x.get("last_activity") or 0)
         for item in out:
             item["is_current"] = item["account"] == newest["account"]
+        # 多个账号活跃时间很接近时，「当前登录」是靠 mtime 猜的，不一定准。
+        # 把这个不确定性显式告诉前端，别让用户以为程序认得准。
+        ranked = sorted((x.get("last_activity") or 0) for x in out)
+        if len(ranked) >= 2 and (ranked[-1] - ranked[-2]) < 600:
+            for item in out:
+                item["current_uncertain"] = True
     return out
 
 
@@ -191,7 +218,13 @@ def get_db(account: Optional[str] = None):
     with _lock:
         if key in _db_cache:
             return _db_cache[key]
-        db = WeChatDB(account=account) if account else WeChatDB()
+        db_dir = _resolve_db_dir()
+        if not db_dir:
+            raise RuntimeError(
+                "未找到微信数据目录。请在「设置 → 微信连接」里手动指定微信文件目录"
+                "（微信里：设置 → 文件管理 可以看到实际路径）")
+        db = WeChatDB(db_dir=db_dir, account=account) if account \
+            else WeChatDB(db_dir=db_dir)
         _db_cache[key] = db
         return db
 

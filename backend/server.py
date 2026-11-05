@@ -64,6 +64,7 @@ import scheduler  # noqa: E402
 import settings as settings_mod  # noqa: E402
 import targets as targets_mod  # noqa: E402
 import update as update_mod  # noqa: E402
+import wxdir  # noqa: E402
 from sender import SendEngine, find_wechat_window  # noqa: E402
 
 ROOT = userdata.data_root()
@@ -187,11 +188,15 @@ def _send_one(engine, display: str, wxid, text: str, shot_dir: str,
     attempts = max(1, int(cfg.get("retry_times") or 0) + 1)
     retry_delay = float(cfg.get("retry_delay_seconds") or 3)
 
-    shot_path = os.path.join(
-        shot_dir, time.strftime("%Y%m%d"),
-        "r%02d_%s_%s.png" % (pair.get("index") or 1, time.strftime("%H%M%S"),
-                             _safe(display)),
-    )
+    # 截图存档可关（设置里「发送后自动截图存档」）。
+    # 关掉后 shot_path 传 None，send_to 就完全跳过截图 —— 既不写盘也不抓画面。
+    shot_path = None
+    if bool(cfg.get("shot_enabled", True)):
+        shot_path = os.path.join(
+            shot_dir, time.strftime("%Y%m%d"),
+            "r%02d_%s_%s.png" % (pair.get("index") or 1, time.strftime("%H%M%S"),
+                                 _safe(display)),
+        )
 
     res: Dict[str, Any] = {}
     ok = False
@@ -800,13 +805,23 @@ class Handler(BaseHTTPRequestHandler):
                                    "backups": backup_mod.list_backups(DATA_DIR),
                                    "files": list(backup_mod.BACKUP_FILES)})
             if p == "/api/app":
-                # 程序自身信息：版本号与发布页。前端用来显示「当前版本」。
+                # 程序自身信息：版本号、发布页、备用下载渠道（百度网盘）。
+                st = settings_mod.load(DATA_DIR)
                 return self._json({
                     "ok": True,
                     "version": APP_VERSION or "未知",
                     "repo": update_mod.REPO,
                     "releases_url": update_mod.RELEASES_PAGE,
+                    "pan_url": str(st.get("pan_url") or ""),
+                    "pan_code": str(st.get("pan_code") or ""),
+                    "shot_enabled": bool(st.get("shot_enabled", True)),
                 })
+            if p == "/api/wxdir":
+                # 微信数据目录诊断。?manual=xxx 可以先试一个候选路径再决定要不要保存。
+                manual = (q.get("manual") or [""])[0]
+                if not manual:
+                    manual = str(settings_mod.get(DATA_DIR, "wechat_db_dir") or "")
+                return self._json({"ok": True, **wxdir.diagnose(manual)})
             if p == "/api/update/check":
                 # 查 GitHub 最新正式版并与当前版本比较。
                 # 允许 ?refresh=1 绕过 5 分钟缓存（用户手点「再查一次」时用）。
@@ -1044,6 +1059,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": False, "error": "设置有非法值",
                                        "errors": r.get("errors"),
                                        "settings": r.get("settings")}, 400)
+                # 改了微信目录 / 截图开关要立刻生效：
+                # 目录换了必须清缓存，否则还在用旧目录的 WeChatDB 实例。
+                if "wechat_db_dir" in (body or {}):
+                    try:
+                        wxdir.clear_cache()
+                    except Exception:
+                        pass
+                    contacts_mod.clear_cache()
                 return self._json({"ok": True, "saved": r.get("saved"),
                                    **settings_mod.describe(DATA_DIR)})
 

@@ -402,7 +402,20 @@
           <div id="verNow" style="font-size:17px;font-weight:650;letter-spacing:-.2px">–</div>
         </div>
         <button class="btn" id="checkUpdate" type="button">检查更新</button>
+        <a class="btn" id="panBtn" href="#" target="_blank" rel="noopener"
+           title="国内访问 GitHub 慢时用这个">百度网盘下载</a>
       </div>
+      <p class="hint" id="panHint" style="margin:6px 0 0"></p>
+
+      <div class="row" style="margin-top:10px">
+        <label class="chk" style="margin:0">
+          <input type="checkbox" id="shotChk">
+          <span>发送后自动截图存档</span>
+        </label>
+        <span class="pill" id="shotMsg">–</span>
+      </div>
+      <p class="hint" style="margin:6px 0 0">关掉后不再往 <code>shots/</code> 写图，
+        省磁盘也不留聊天画面；发送与回读校验不受影响。</p>
 
       <!-- 检查结果面板：默认隐藏，查到结果再展开 -->
       <div id="updBox" class="updbox" hidden>
@@ -422,7 +435,7 @@
 
     <section class="card rise full" style="animation-delay:.28s">
       <h2>运行日志</h2>
-      <p class="hint">截图保存在 shots/&lt;日期&gt;/ 目录下</p>
+      <p class="hint" id="shotHint">截图保存在 shots/&lt;日期&gt;/ 目录下</p>
       <div class="logs" id="logs"><div class="l"><span class="t">等待开始…</span></div></div>
     </section>
 
@@ -907,7 +920,41 @@ async function loadAppInfo(){
     $('verNow').textContent = (d.version && d.version !== '未知')
       ? 'v' + d.version : '未知（非桌面版）';
     if(d.releases_url) $('updPage').href = d.releases_url;
+    // 百度网盘：国内访问 GitHub 慢，作备用渠道
+    if(d.pan_url){
+      $('panBtn').href = d.pan_url;
+      $('panHint').textContent = d.pan_code
+        ? '提取码：' + d.pan_code + '　（国内直连，和 GitHub 上是同一个安装包）'
+        : '百度网盘备用下载（国内直连）';
+    }else{
+      $('panBtn').hidden = true;
+      $('panHint').hidden = true;
+    }
+    // 截图开关与设置里的值保持同步
+    $('shotChk').checked = !!d.shot_enabled;
+    $('shotMsg').textContent = d.shot_enabled ? '已开启' : '已关闭';
+    $('shotHint').textContent = d.shot_enabled
+      ? '截图保存在 shots/<日期>/ 目录下'
+      : '已关闭截图存档：不再往 shots/ 写图（发送与回读校验不受影响）';
   }catch(e){ $('verNow').textContent = '读取失败'; }
+}
+
+async function toggleShot(){
+  const on = $('shotChk').checked;
+  try{
+    const r = await api('/api/settings', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({shot_enabled: on})});
+    if(!r.ok) throw new Error(r.error || '保存失败');
+    $('shotMsg').textContent = on ? '已开启' : '已关闭';
+    $('shotHint').textContent = on
+      ? '截图保存在 shots/<日期>/ 目录下'
+      : '已关闭截图存档：不再往 shots/ 写图（发送与回读校验不受影响）';
+    toast(on ? '已开启：每次发送后截图存档' : '已关闭：不再截图');
+  }catch(e){
+    $('shotChk').checked = !on;      // 保存失败就回滚，别让界面骗人
+    toast('设置失败：' + e.message);
+  }
 }
 
 async function checkUpdateNow(manual){
@@ -1628,6 +1675,7 @@ $('runDoctor').addEventListener('click', runDoctor);
 $('openSettings').addEventListener('click', openSettingsPage);
 $('checkUpdate').addEventListener('click', ()=>checkUpdateNow(true));
 $('updDownload').addEventListener('click', downloadUpdate);
+$('shotChk').addEventListener('change', toggleShot);
 
 /* 失败补发 */
 $('reloadFails').addEventListener('click', loadFails);

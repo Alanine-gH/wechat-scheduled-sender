@@ -66,6 +66,20 @@
     <div class="hint">读取中…</div>
   </div>
 
+  <!-- 紧跟在「微信连接」这一组下面，不再单独加标题（会和分组标题重复） -->
+  <div class="card rise" style="animation-delay:.08s;margin-top:12px">
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn" id="wxdirCheck" type="button">检测微信数据目录</button>
+      <span class="pill" id="wxdirMsg">–</span>
+    </div>
+    <div class="note" id="wxdirBox" style="display:block">点上面的按钮检测一次</div>
+    <div class="preview" id="wxdirAcc" style="display:none"></div>
+    <p class="hint" style="margin:8px 0 0">
+      有些设备把微信文件改到了别的盘，程序自动找不到时，在上面「微信文件目录」
+      填一次路径就好。填到哪一级都行（目录本身、账号目录、或 db_storage 都可以）。
+      改完点顶部的「保存全部改动」，再点这里的检测确认。</p>
+  </div>
+
   <h2 style="font-size:14px;margin:26px 0 6px;font-weight:600">自动运行</h2>
   <p class="hint" style="margin-top:0">把主界面勾选的群/好友存成自动任务，
     程序常驻时到点自动执行，不用每天手动点。</p>
@@ -142,6 +156,47 @@ async function resetAll(){
     toast('已恢复默认值');
     await loadAuto();
   }catch(e){ toast('恢复失败：' + e.message); }
+}
+
+/* ---------- 微信连接 ---------- */
+async function loadWxdir(){
+  const msg = $('wxdirMsg'), box = $('wxdirBox'), acc = $('wxdirAcc');
+  msg.textContent = '检测中…';
+  try{
+    // 优先用界面上刚填的路径试，不必先保存
+    const typed = ($('set_wechat_db_dir') || {}).value || '';
+    const d = await api('/api/wxdir' + (typed ? '?manual=' + encodeURIComponent(typed) : ''));
+    if(!d.db_dir){
+      msg.textContent = '未找到';
+      box.className = 'warn';
+      box.textContent = '没有找到微信数据目录。请在微信里查看「设置 → 文件管理」里的'
+        + '存储路径，填到上面的「微信文件目录」再点检测。';
+      acc.style.display = 'none';
+      return;
+    }
+    const src = d.source_cn || d.source || '';
+    msg.textContent = (d.accounts || []).length + ' 个账号';
+    box.className = 'note';
+    box.textContent = '数据目录：' + d.db_dir + '（来源：' + src + '）'
+      + (d.source === 'setting' ? '　—— 用的是你手动填的路径' : '');
+    if((d.accounts || []).length){
+      const rows = d.accounts.map(a => {
+        const t = a.last_activity
+          ? new Date(a.last_activity * 1000).toLocaleString() : '—';
+        return `<tr><td>${escapeHtml(a.account)}</td>
+          <td style="white-space:nowrap">${escapeHtml(t)}</td></tr>`;
+      }).join('');
+      acc.style.display = 'block';
+      acc.innerHTML = `<table><thead><tr><th>账号目录</th><th>最近活动</th></tr></thead>
+        <tbody>${rows}</tbody></table>`;
+    }else{
+      acc.style.display = 'none';
+    }
+  }catch(e){
+    msg.textContent = '检测失败';
+    box.className = 'warn';
+    box.textContent = e.message;
+  }
 }
 
 /* ---------- 自动运行 ---------- */
@@ -313,6 +368,8 @@ $('saveSettings').addEventListener('click', saveAll);
 $('resetSettings').addEventListener('click', resetAll);
 $('closeBtn').addEventListener('click', closePage);
 
+$('wxdirCheck').addEventListener('click', loadWxdir);
+
 $('reloadAuto').addEventListener('click', loadAuto);
 $('saveAutoTargets').addEventListener('click', saveAutoTargets);
 $('autoRunNow').addEventListener('click', autoRunNow);
@@ -334,6 +391,7 @@ document.addEventListener('keydown', e => {
 /* ---------- 启动 ---------- */
 (async () => {
   await loadSettings();
+  await loadWxdir();        // 顺带把当前识别到的目录和账号显示出来
   await loadAuto();
   await loadAutostart();
   await loadBackups();

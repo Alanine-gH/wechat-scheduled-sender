@@ -9,6 +9,22 @@
 
 ## 一、快速开始
 
+### 下载安装包（普通用户看这里）
+
+两处内容相同，任选其一：
+
+| 渠道 | 地址 |
+|---|---|
+| **百度网盘**（国内直连，推荐） | `https://pan.baidu.com/s/1uX-YcOyonI7ALNkEY-WtnQ?pwd=c26c`　提取码 **c26c** |
+| GitHub Releases | https://github.com/Alanine-gH/wechat-scheduled-sender/releases |
+
+- 安装包文件名 `WeChatSender-x.x.x-x64.exe`，**已内置 Python，目标电脑无需另装**
+- 未做代码签名，双击时 Windows 提示「未知发布者」选「仍要运行」
+- 建议装到 D 盘一个简单目录，不要装 `C:\Program Files`
+- 程序内也有入口：「6 · 设置与运维」右下角的「检查更新」和「百度网盘下载」
+
+### 从源码运行（开发者）
+
 双击 **`启动.bat`**（首次会自动 `npm install`，约 100 MB，请耐心等待）。
 
 也可以手动：

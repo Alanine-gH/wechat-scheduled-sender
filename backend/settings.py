@@ -56,6 +56,7 @@ DEFAULTS: Dict[str, Any] = {
     "retry_delay_seconds": 3,
     "verify_timeout": 8,                 # 回读校验最长等待（秒）
     "clear_input_before": True,          # 发送前清空输入框
+    "shot_enabled": True,                # 发送后自动截图存档（可关，省磁盘/隐私）
 
     # 自动运行
     "auto_enabled": False,               # 到点自动执行
@@ -81,6 +82,17 @@ DEFAULTS: Dict[str, Any] = {
     # 清理
     "log_keep_days": 30,
     "shot_keep_days": 30,
+
+    # 关于 / 分发渠道
+    # 用户在国内，GitHub 访问不稳定，所以另有百度网盘同步发布。
+    # 放设置里而不是写死在代码里：换分享链接不用重新打包。
+    "pan_url": "https://pan.baidu.com/s/1uX-YcOyonI7ALNkEY-WtnQ?pwd=c26c",
+    "pan_code": "c26c",
+
+    # 微信连接
+    # 留空 = 自动查找。有些设备把微信文件改到了别的盘、或用绿色版，
+    # 自动找不到时需要用户手动指一下（填到哪一级都行，程序会自己往上/往下对齐）。
+    "wechat_db_dir": "",
 }
 
 # ---------------------------------------------------------------------------
@@ -135,6 +147,8 @@ SCHEMA: List[Dict[str, Any]] = [
      "type": "number", "min": 1, "max": 60, "help": "发送后等数据库落库的最长时间"},
     {"key": "clear_input_before", "group": "可靠性", "label": "发送前清空输入框",
      "type": "bool", "help": "避免上一条的残留和这一条混在一起"},
+    {"key": "shot_enabled", "group": "可靠性", "label": "发送后自动截图存档",
+     "type": "bool", "help": "关闭后不再写 shots/ 目录，省磁盘也不留聊天画面"},
 
     # ── 自动运行 ──
     {"key": "auto_enabled", "group": "自动运行", "label": "启用自动运行",
@@ -164,6 +178,17 @@ SCHEMA: List[Dict[str, Any]] = [
      "min": 1, "max": 3650},
     {"key": "shot_keep_days", "group": "清理", "label": "截图保留天数", "type": "number",
      "min": 1, "max": 3650},
+
+    # ── 关于 / 分发 ──
+    {"key": "pan_url", "group": "关于", "label": "百度网盘分享链接", "type": "text",
+     "help": "国内访问 GitHub 慢，新版同时同步到这里"},
+    {"key": "pan_code", "group": "关于", "label": "百度网盘提取码", "type": "text"},
+
+    # ── 微信连接 ──
+    {"key": "wechat_db_dir", "group": "微信连接", "label": "微信文件目录",
+     "type": "text",
+     "help": "留空自动查找。找不到时填微信的存储目录（微信：设置→文件管理），"
+             "填到哪一级都行"},
 ]
 
 SCHEMA_KEYS = {s["key"] for s in SCHEMA}
