@@ -1331,9 +1331,10 @@ function testNotification(){
 }
 
 /* ---------- 生成计划 ---------- */
-async function genPlan(){
+async function genPlan(opts){
+  const silent = !!(opts && opts.silent);   // start() 里重建时不要弹「计划已生成」
   const targets = [...state.selected.values()].map(x=>({name:x.name, username:x.username, kind:x.kind}));
-  if(!targets.length) return toast('请先选择至少一个目标');
+  if(!targets.length){ toast('请先选择至少一个目标'); return null; }
   const body = {
     targets: targets.map(t=>t.name),
     rounds: +$('rounds').value, per_round: +$('perRound').value,
@@ -1360,7 +1361,7 @@ async function genPlan(){
     const g = p.guard;
     if(g && (g.warned||[]).length){
       toast(`计划已生成，但有 ${g.warned.length} 处措辞风险，见提示`);
-    }else{
+    }else if(!silent){
       toast('计划已生成');
     }
 
@@ -1414,15 +1415,37 @@ async function genPlan(){
     }
     $('planPreview').style.display='block';
     $('planPreview').innerHTML = `<table><thead><tr><th>轮次</th><th>本轮总等待</th><th>条数</th><th>消息预览（首行）</th></tr></thead><tbody>${rows}</tbody></table>${warn}`;
-  }catch(e){ toast('生成计划失败：'+e.message); }
+  }catch(e){
+      // 重建失败必须把旧计划作废 —— 否则 start() 会拿着上一次的计划开跑，
+      // 正是「补了文字却只发素材」那类问题的根源。
+      state.plan = null;
+      if(!silent) toast('生成计划失败：' + e.message);
+      return;
+    }
 }
 
 /* ---------- 执行 ---------- */
 async function start(){
-  if(!state.plan) return toast('请先生成计划预览');
+  // 开始前**必须用当前内容重建计划**。
+  // state.plan 可能是几分钟前点的预览 —— 甚至是消息池还空着的时候点的，
+  // 那时后端会给每个 pair 补空 text（「只发素材」模式）。之后再补文字、点保存，
+  // 计划却没重新生成，于是「设置了先发文字，结果只发了素材」，重试也一样。
+  $('startBtn').disabled = true;
+  try{
+    await genPlan({silent:true});
+  }catch(e){
+    $('startBtn').disabled = false;
+    return toast('生成计划失败：' + e.message);
+  }
+  if(!state.plan){ $('startBtn').disabled = false; return; }
+  if(state.plan.blocked_reason){
+    $('startBtn').disabled = false;
+    return toast('现在不能发：' + state.plan.blocked_reason);
+  }
+
   const tlist = state.plan._targets || [...state.selected.values()]
     .map(x=>({name:x.name, username:x.username}));
-  if(!tlist.length) return toast('请先选择目标');
+  if(!tlist.length){ $('startBtn').disabled = false; return toast('请先选择目标'); }
 
   if(state.plan.mode === 'campaign'){
     // 编排模式：事件表已由后端定好时间与内容，**不要重建**。
@@ -1444,9 +1467,9 @@ async function start(){
   }
 
   if(!(state.plan.events||[]).length && !(state.plan.assignments||[]).length){
+    $('startBtn').disabled = false;   // 开头已禁用，这里必须放开，否则按钮永久灰掉
     return toast('计划为空，无法开始');
   }
-  $('startBtn').disabled = true;
   try{
     await api('/api/start', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({plan: state.plan, account: $('accountSel').value})});

@@ -233,6 +233,7 @@ def build_campaign_plan(targets: List[str],
                         window_start: Optional[str] = "08:00",
                         window_end: Optional[str] = "22:00",
                         data_dir: str = "",
+                        media_first: bool = True,
                         now: Optional[_dt.datetime] = None) -> Dict[str, Any]:
     """生成「按星期内容 + 固定时间 + 双波次」的投放计划。
 
@@ -291,7 +292,10 @@ def build_campaign_plan(targets: List[str],
             "kind": e["kind"],
             "text": e["text"],
             "media_path": e.get("media_path") or "",
-            "media_first": True,
+            # 必须跟随用户的「素材与文字顺序」设置。
+            # 这里原来硬编码 True，导致编排/自动运行模式下界面选了「先发文字」
+            # 也被静默忽略，永远先发素材。
+            "media_first": bool(media_first),
         })
 
     # 单次运行上限：截断事件表并如实报告截掉了多少

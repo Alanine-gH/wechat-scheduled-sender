@@ -195,6 +195,14 @@ def _send_one(engine, display: str, wxid, text: str, shot_dir: str,
 
     res: Dict[str, Any] = {}
     ok = False
+
+    # 有素材但没有文字时明确说出来。
+    # 这类情况多半是「计划是消息池还空着时生成的」，事后补了文字却没重建计划，
+    # 表现就是「设置了先发文字，结果只发了素材」，而且日志里看不出任何异常。
+    if (pair.get("media_path") or "") and not (text or "").strip():
+        RT.log("WARN", "%s：本条没有文字，只发素材"
+                       "（若你本意是发文字，请重新生成计划预览）" % display)
+
     for attempt in range(attempts):
         if not RT.running:
             return "cancel"
@@ -320,7 +328,8 @@ def _run_events(engine, plan: dict) -> List[str]:
             "index": 1,
             "target": ev.get("target"),
             "media_path": ev.get("media_path") or "",
-            "media_first": True,
+            # 跟随事件自带的顺序设置（原来硬编码 True，界面选择被忽略）
+            "media_first": bool(ev.get("media_first", True)),
         }
         wxid = (plan.get("username_of") or {}).get(ev.get("target") or "")
         kind = ev.get("kind") or "main"
@@ -977,6 +986,9 @@ class Handler(BaseHTTPRequestHandler):
                         window_start=cfg["send_window_start"],
                         window_end=cfg["send_window_end"],
                         data_dir=DATA_DIR,
+                        # 「素材与文字顺序」必须传下去；否则编排模式下界面选了
+                        # 「先发文字」也会被忽略（planner 里原来硬编码 True）。
+                        media_first=bool(media_spec.get("media_first", True)),
                     )
                     # 「只在指定星期执行」：今天不在名单里就产出空计划并说明原因
                     plan["run_days"] = run_days
