@@ -44,7 +44,15 @@ except Exception:  # pragma: no cover
 MORE_NAMES = ("更多", "...", "···", "聊天信息", "群聊信息", "Chat Info")
 FIND_NAMES = ("查找聊天内容", "查找聊天记录", "搜索聊天内容", "聊天记录")
 MEMBER_TAB_NAMES = ("群成员",)
-SEARCH_NAMES = ("搜索群成员", "搜索", "Search")
+# 只认「搜索群成员」这一类，**绝不认裸「搜索」**。
+# 聊天记录窗口顶部的全局搜索框 Name 恰好是「搜索」，
+# 一旦拿它兜底，昵称就会被当成聊天内容关键词搜出全群消息 ——
+# 这正是 2026-11-10 实测踩到的坑（47 张截图全是别人的消息）。
+MEMBER_SEARCH_NAMES = ("搜索群成员", "搜索成员", "查找群成员",
+                       "搜索群聊成员", "Search group members")
+GLOBAL_SEARCH_MARK = "搜索"
+MEMBER_ITEM_TYPES = ("ListItemControl", "ButtonControl", "TextControl",
+                     "GroupControl", "ImageControl", "PaneControl")
 # 「查找聊天记录」窗口标题实测形如："群名"的聊天记录(500)
 HIST_TITLE_MARKS = ("的聊天记录", "聊天记录")
 
@@ -284,8 +292,19 @@ def find_anywhere(names, types=None, prefer=None):
 
 
 def _page_down(prefer: Optional[int] = None) -> None:
-    """键盘翻页（不用滚轮坐标），让 Qt 虚拟列表把下一批项渲染进控件树。"""
-    for hwnd, r in _roots(prefer):
+    """键盘翻页（不用滚轮坐标），让 Qt 虚拟列表把下一批项渲染进控件树。
+
+    优先聚焦「含搜索群成员输入框」的那个浮层窗口 —— 用户步骤 6 的
+    「下拉找到本人头像」发生在浮层里，滚错窗口等于没翻。
+    """
+    pairs = _roots(prefer)
+    ordered = []
+    for h, r in pairs:
+        has_member_box = any(_is_member_search(c)
+                             for c, _d in _walk(r, max_nodes=800))
+        ordered.append((0 if has_member_box else 1, h, r))
+    ordered.sort(key=lambda x: x[0])
+    for _pri, _h, r in ordered:
         try:
             r.SetFocus()
             auto.SendKeys("{PageDown}", waitTime=0.03)
@@ -439,6 +458,137 @@ def _digest(texts) -> str:
     return hashlib.sha1("\n".join(texts).encode("utf-8", "replace")).hexdigest()[:12]
 
 
+# ------------------------------------------------------- 群成员筛选状态校验
+def _edit_value(c) -> str:
+    """读 EditControl 当前值。读不到返回空串。"""
+    try:
+        p = c.GetValuePattern()
+        if p is not None:
+            return str(p.CurrentValue or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _is_global_search(c) -> bool:
+    """是不是聊天记录窗口顶部那个「全局搜索聊天内容」框。
+
+    实测控件：EditControl / mmui::XValidatorTextEdit / Name='搜索'。
+    往这里输昵称 = 搜全群消息，必须杜绝。
+    """
+    if c.ControlTypeName != "EditControl":
+        return False
+    name = _field(c, "Name")
+    cls = _field(c, "ClassName").lower()
+    return name == GLOBAL_SEARCH_MARK or (
+        not name and "validator" in cls)
+
+
+def _is_member_search(c) -> bool:
+    """是不是「群成员」浮层里的「搜索群成员」框。"""
+    if c.ControlTypeName != "EditControl":
+        return False
+    probe = " ".join((_field(c, "Name"), _field(c, "AutomationId"),
+                      _field(c, "ClassName"))).lower()
+    return any(k.lower() in probe for k in MEMBER_SEARCH_NAMES)
+
+
+def search_state(roots) -> Dict[str, Any]:
+    """扫描所有窗口的搜索框，返回当前处于哪种搜索状态。
+
+    这是防止「假成功」的关键：只有出现成员搜索框、且全局框为空，
+    才说明真的切到了「群成员」筛选页。
+    """
+    st = {"member_box": None, "global_boxes": [], "global_values": [],
+          "edits": 0}
+    for _h, r in roots:
+        for c, _d in _walk(r, max_nodes=1200):
+            if c.ControlTypeName != "EditControl":
+                continue
+            st["edits"] += 1
+            if _is_member_search(c):
+                st["member_box"] = c
+            elif _is_global_search(c):
+                st["global_boxes"].append(c)
+                v = _edit_value(c)
+                if v:
+                    st["global_values"].append(v)
+    st["member_open"] = st["member_box"] is not None
+    st["global_dirty"] = bool(st["global_values"])
+    return st
+
+
+def member_panel_ready(roots) -> bool:
+    """「群成员」筛选页是否真的打开了（有成员搜索框、全局框没被写脏）。"""
+    st = search_state(roots)
+    return st["member_open"] and not st["global_dirty"]
+
+
+def find_member_search(roots):
+    """只在真正的成员搜索框里找，绝不退回全局搜索框。"""
+    st = search_state(roots)
+    return st["member_box"]
+
+
+def tab_strategies(tab):
+    """激活 TabItem 的候选动作，按语义强度排序。
+
+    实测：微信 ``mmui::XMouseEventView`` 的 ``Click()`` **返回成功但不切换 tab**
+    （和 sender.py 里 InvokePattern 那个坑同源）。调用方必须每试一个策略
+    就用 ``member_panel_ready`` 验证状态，绝不「点了就算成功」。
+    """
+    return (
+        ("selection", lambda: tab.GetSelectionItemPattern().Select()),
+        ("legacy", lambda: tab.GetLegacyIAccessiblePattern().DoDefaultAction()),
+        ("click", lambda: click_control(tab)),
+        ("focus+space", lambda: (tab.SetFocus(),
+                                 auto.SendKeys("{Space}", waitTime=0.05))),
+    )
+
+
+def wait_member_panel(prefer, baseline=None, timeout=4.0) -> bool:
+    """轮询等「群成员」浮层出现。浮层常是独立顶层窗口，会带自己的搜索框。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if member_panel_ready(_roots(prefer)):
+            return True
+        time.sleep(0.3)
+    return False
+
+
+def _clear_global_search(roots) -> None:
+    """把误写进全局搜索框的关键词清掉，避免污染用户的微信界面。
+
+    只清「聊天记录窗口顶部」那个框，不动成员搜索框。
+    """
+    for _h, r in roots:
+        for c, _d in _walk(r, max_nodes=1200):
+            if not _is_global_search(c) or not _edit_value(c):
+                continue
+            try:
+                p = c.GetValuePattern()
+                if p is not None:
+                    p.SetValue("")
+                    return
+            except Exception:
+                pass
+            try:
+                c.Click()
+                auto.SendKeys("{Ctrl}a", waitTime=0.03)
+                auto.SendKeys("{Delete}", waitTime=0.03)
+            except Exception:
+                pass
+            return
+
+
+def result_looks_filtered(roots) -> bool:
+    """结果页是否仍像「按成员筛选」，而不是全局关键词搜索。
+
+    全局搜索框里有值 = 昵称被当成聊天内容关键词 = 结果全是别人的消息。
+    """
+    return not search_state(roots)["global_dirty"]
+
+
 # ---------------------------------------------------------------- 任务状态
 class _Job:
     def __init__(self):
@@ -518,43 +668,91 @@ def _ui_one(engine, group: str, nicks: List[str], pages: int,
         out["error"] = "聊天记录窗口控件树不可用"
         return out
 
-    # 诊断：把这一屏真实控件名落盘，方便日后调候选名
+    # 诊断：把关键节点的真实控件名落盘。
+    # 之前只在打开窗口时 dump 一份，看不到「点群成员之后」的状态，
+    # 导致 tab 假成功这个问题很难查。现在分阶段各存一份。
+    diag: List[Dict[str, Any]] = []
+
+    def snap(stage: str) -> None:
+        diag.append({"stage": stage,
+                     "windows": [{"hwnd": h, "tree": dump_tree(r)}
+                                 for h, r in _roots(hwnd)]})
+
     try:
         os.makedirs(log_dir, exist_ok=True)
-        with open(os.path.join(log_dir, "myhistory_tree_%s.json"
-                               % time.strftime("%Y%m%d_%H%M%S")),
-                  "w", encoding="utf-8") as f:
-            json.dump({"group": group, "hwnd": hwnd,
-                       "tree": dump_tree(root)}, f, ensure_ascii=False, indent=1)
+        out["diag_file"] = os.path.join(
+            log_dir, "myhistory_tree_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
     except Exception:
         pass
 
-    # 5) 群成员 tab
-    tab = find_anywhere(MEMBER_TAB_NAMES, prefer=hwnd)
-    if tab is None or not click_control(tab):
-        out["error"] = "没找到「群成员」标签"
-        return out
-    time.sleep(0.8)
+    def flush_diag() -> None:
+        if not out.get("diag_file"):
+            return
+        try:
+            with open(out["diag_file"], "w", encoding="utf-8") as f:
+                json.dump({"group": group, "hwnd": hwnd, "stages": diag},
+                          f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
 
-    # 6) 搜索框（可能在浮层里）+ 输入本人昵称（多候选逐个试）
-    box = find_anywhere(SEARCH_NAMES,
-                        types=("EditControl", "GroupControl", "PaneControl"),
-                        prefer=hwnd)
-    if box is None:
-        out["error"] = "没找到「搜索群成员」输入框"
+    def fail(msg: str, stage: str = "失败"):
+        out["error"] = msg
+        snap(stage)
+        flush_diag()
         return out
+
+    snap("窗口刚打开")
+
+    # 5) 群成员 tab：逐个策略试，每试一次都验证「成员面板真的开了」。
+    #    微信 mmui::XMouseEventView 的 Click() 会假成功，不能点了就算完。
+    tab = find_anywhere(MEMBER_TAB_NAMES,
+                        types=("TabItemControl", "ButtonControl",
+                               "RadioButtonControl", "TextControl"),
+                        prefer=hwnd)
+    if tab is None:
+        return fail("没找到「群成员」标签（用「探测控件树」看真实名字）",
+                    "没找到群成员标签")
+
+    opened, used = False, ""
+    for name, act in tab_strategies(tab):
+        try:
+            act()
+        except Exception:
+            continue
+        if wait_member_panel(hwnd, timeout=2.5):
+            opened, used = True, name
+            break
+        # 状态没变就撤销这一步可能造成的副作用，再试下一个策略
+        _clear_global_search(_roots(hwnd))
+    if not opened:
+        _clear_global_search(_roots(hwnd))
+        return fail(("点了「群成员」但筛选面板没打开（试过 %s）。"
+                     "已停止，避免把昵称搜成全群消息。请用「探测控件树」"
+                     "导出真实控件名，填到「设置 → 我的群消息 → 追加控件候选名」"
+                     % " / ".join(n for n, _f in tab_strategies(tab))),
+                    "群成员面板未打开")
+    out["tab_strategy"] = used
+    snap("群成员面板已打开")
+
+    # 6) 只认成员搜索框，绝不退回全局搜索框
+    roots_now = _roots(hwnd)
+    box = find_member_search(roots_now)
+    if box is None:
+        return fail("「群成员」面板里没找到「搜索群成员」输入框，已停止",
+                    "没找到成员搜索框")
 
     hit = False
     for nick in nicks:
         if not set_text(box, nick, prefer_keys=True):
             continue
         time.sleep(1.0)
+        # 最后一道闸：昵称绝不能跑进全局搜索框
+        if search_state(_roots(hwnd))["global_dirty"]:
+            _clear_global_search(_roots(hwnd))
+            break
         # 头像也要下拉才出现（用户步骤 6）
-        item = find_scrolling(
-            [nick],
-            types=("ListItemControl", "ButtonControl", "TextControl",
-                   "GroupControl", "ImageControl", "PaneControl"),
-            prefer=hwnd, scrolls=5)
+        item = find_scrolling([nick], types=MEMBER_ITEM_TYPES,
+                              prefer=hwnd, scrolls=5)
         if item is not None:
             # 7) 点本人头像 / 结果项
             click_control(item)
@@ -562,10 +760,19 @@ def _ui_one(engine, group: str, nicks: List[str], pages: int,
             out["matched_nick"] = nick
             break
     if not hit:
-        out["error"] = "按昵称没匹配到本人（把「本人在群里的昵称」填准，多个用 | 分隔）"
-        return out
+        return fail(("按自动识别的昵称没匹配到本人头像；已停止，"
+                     "避免把全群消息当成结果截图。可在「补充昵称」里"
+                     "填本人在该群显示的名字"),
+                    "没匹配到本人头像")
 
     time.sleep(1.2)
+    # 点头像后仍要确认没有退化成全局关键词搜索
+    roots_final = _roots(hwnd)
+    if not result_looks_filtered(roots_final):
+        _clear_global_search(roots_final)
+        return fail(("点头像后界面退回了全局聊天记录搜索，结果不可信，"
+                     "已停止截图"),
+                    "点头像后退回全局搜索")
 
     # 8) 逐屏截屏 + 抓文本，内容不再变化时停止。
     #    文本跨所有微信窗口抓（筛选结果可能在浮层），截图只截聊天记录窗口。
@@ -577,8 +784,14 @@ def _ui_one(engine, group: str, nicks: List[str], pages: int,
     for i in range(max(1, pages)):
         if _cancelled():
             break
+        roots_i = _roots(hwnd)
+        # 每一屏截图前都复查，防止中途界面被微信重建回全局搜索
+        if not result_looks_filtered(roots_i):
+            out["error"] = ("第 %d 屏时界面不再是「按成员筛选」，"
+                            "已停止，后续截图不生成" % (i + 1))
+            break
         texts = []
-        for _h, r in _roots(hwnd):
+        for _h, r in roots_i:
             for t in collect_texts(r):
                 if t not in texts:
                     texts.append(t)
@@ -602,9 +815,11 @@ def _ui_one(engine, group: str, nicks: List[str], pages: int,
         except Exception:
             break
     out["texts"] = alltexts
-    out["ok"] = bool(out["shots"])
-    if not out["ok"]:
+    out["ok"] = bool(out["shots"]) and "error" not in out
+    if not out["ok"] and "error" not in out:
         out["error"] = "截屏失败（PrintWindow 未取到内容）"
+    snap("截图完成" if out["ok"] else "截图中断")
+    flush_diag()
 
     # 收尾：只关聊天记录窗口，不动主窗口
     try:
