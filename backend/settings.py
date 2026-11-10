@@ -93,6 +93,13 @@ DEFAULTS: Dict[str, Any] = {
     # 留空 = 自动查找。有些设备把微信文件改到了别的盘、或用绿色版，
     # 自动找不到时需要用户手动指一下（填到哪一级都行，程序会自己往上/往下对齐）。
     "wechat_db_dir": "",
+
+    # 我的群消息（本人在群里发了什么）
+    # 昵称全自动：从 chat_room.ext_buffer 按群解析本人群昵称，
+    # 没设群昵称的群退回微信昵称。此项只是「识别不到时的兜底补充」。
+    "my_nickname": "",
+    "myhistory_pages": 3,                # 界面模式最多翻几屏
+    "myhistory_names_extra": [],         # 追加 UIA 控件候选名（一行一个）
 }
 
 # ---------------------------------------------------------------------------
@@ -189,6 +196,16 @@ SCHEMA: List[Dict[str, Any]] = [
      "type": "text",
      "help": "留空自动查找。找不到时填微信的存储目录（微信：设置→文件管理），"
              "填到哪一级都行"},
+
+    # ── 我的群消息 ──
+    {"key": "my_nickname", "group": "我的群消息", "label": "补充昵称（一般不用填）",
+     "type": "text",
+     "help": "昵称已按群自动识别；只有个别群匹配不到时才在这里补，多个用 | 分隔"},
+    {"key": "myhistory_pages", "group": "我的群消息", "label": "界面截屏最多翻几屏",
+     "type": "number", "min": 1, "max": 10},
+    {"key": "myhistory_names_extra", "group": "我的群消息",
+     "label": "追加控件候选名", "type": "list",
+     "help": "微信改版导致找不到按钮时，把「探测控件树」里的真实名字一行一个填这里"},
 ]
 
 SCHEMA_KEYS = {s["key"] for s in SCHEMA}

@@ -58,6 +58,7 @@ import housekeeping as house_mod  # noqa: E402
 import inbox as inbox_mod  # noqa: E402
 import leads as leads_mod  # noqa: E402
 import media as media_mod  # noqa: E402
+import myhistory as myhistory_mod  # noqa: E402
 import planner  # noqa: E402
 import report as report_mod  # noqa: E402
 import scheduler  # noqa: E402
@@ -816,6 +817,25 @@ class Handler(BaseHTTPRequestHandler):
                     "pan_code": str(st.get("pan_code") or ""),
                     "shot_enabled": bool(st.get("shot_enabled", True)),
                 })
+            if p == "/api/myhistory/status":
+                return self._json({"ok": True, **myhistory_mod.status()})
+            if p == "/api/myhistory/self":
+                # 只读：预先展示「自动识别到本人在各群叫什么」，用户零操作即可确认。
+                # 不传 nickname 也能用；with_db=False 避免为了预览去开库。
+                nick = (q.get("nickname") or [""])[0]
+                try:
+                    import contacts as C
+                    per = myhistory_mod.group_display_names(C.get_db())
+                    glob = myhistory_mod.global_self_names(C.get_db())
+                except Exception:
+                    per, glob = {}, []
+                return self._json({
+                    "ok": True, "global_names": glob,
+                    "candidates": myhistory_mod.self_candidates(
+                        DATA_DIR, nick, with_db=False) + glob,
+                    "groups": [{"username": k, "names": v[:3]}
+                               for k, v in per.items()],
+                    "group_count": len(per)})
             if p == "/api/wxdir":
                 # 微信数据目录诊断。?manual=xxx 可以先试一个候选路径再决定要不要保存。
                 manual = (q.get("manual") or [""])[0]
@@ -1163,6 +1183,32 @@ class Handler(BaseHTTPRequestHandler):
                 body = body or {}
                 name = str(body.get("asset") or "")
                 return self._json(update_mod.start_download(DATA_DIR, name))
+
+            if p == "/api/myhistory/dump":
+                # 只读探测：把当前微信窗口的 UIA 控件树写到 logs/，
+                # 用于校准「更多 / 查找聊天内容 / 群成员」的候选名。
+                return self._json(myhistory_mod.dump_trees(LOG_DIR))
+            if p == "/api/myhistory/stop":
+                return self._json(myhistory_mod.stop())
+            if p == "/api/myhistory/start":
+                body = body or {}
+                mode = str(body.get("mode") or "ui")
+                if mode not in ("ui", "db", "both"):
+                    return self._json({"ok": False, "error": "mode 非法"}, 400)
+                targets = body.get("targets") or []
+                if not targets:
+                    return self._json({"ok": False, "error": "还没勾选群"}, 400)
+                if mode in ("ui", "both") and not bool(
+                        settings_mod.get(DATA_DIR, "shot_enabled")):
+                    return self._json({
+                        "ok": False,
+                        "error": "截图存档已关闭，请先在设置里开启「发送后自动截图存档」，"
+                                 "或改用「本地库导出」"}, 400)
+                pages = int(body.get("pages") or 3)
+                pages = max(1, min(10, pages))
+                return self._json(myhistory_mod.start(
+                    targets, str(body.get("nickname") or ""), mode, pages,
+                    SHOT_DIR, DATA_DIR, LOG_DIR))
 
             if p == "/api/notify/ack":
                 # 标记已通知，避免同一线索反复弹窗

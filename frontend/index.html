@@ -433,6 +433,68 @@
       </div>
     </section>
 
+    <section class="card rise full" style="animation-delay:.27s" id="myPanel">
+      <style>
+        /* 只作用于本面板，不改全局样式文件 */
+        #myResults { transition: opacity .28s var(--ease), transform .28s var(--ease); }
+        #myResults.rise { animation: rise .4s var(--ease) both; }
+        #myResults.out { opacity: 0; transform: translateY(8px); }
+        #myResults img { transition: transform .2s var(--ease), box-shadow .2s var(--ease); }
+        #myResults img:hover { transform: scale(1.07);
+                               box-shadow: 0 4px 14px rgba(37,99,235,.28); }
+        #myStart, #myStop, #myDump { transition: transform .16s var(--ease),
+                                                  box-shadow .2s var(--ease); }
+        #myStart:active, #myStop:active, #myDump:active { transform: scale(.96); }
+        #myHelp { transition: opacity .25s var(--ease); }
+      </style>
+      <h2>7 · 我的群消息</h2>
+      <p class="hint">把「本人在某个群里发过什么」找出来。
+        <strong>昵称全自动识别</strong>：从微信本地资料里按群读取你自己的显示名，
+        选中多少个群、各群昵称不一样都能各自对上，不用手填。
+        界面截屏走微信「查找聊天记录 → 群成员 → 本人」拿视觉凭证；
+        本地库导出直接读已解密的聊天库，更快更全，不动微信窗口。</p>
+
+      <div class="row" style="align-items:flex-end">
+        <div style="flex:2;min-width:210px">
+          <label for="myMode">方式</label>
+          <select id="myMode">
+            <option value="ui">界面截屏</option>
+            <option value="db">本地库导出</option>
+            <option value="both" selected>两者都要</option>
+          </select>
+        </div>
+        <div style="flex:1;min-width:130px">
+          <label for="myPages">最多翻几屏</label>
+          <input type="number" id="myPages" value="3" min="1" max="10">
+        </div>
+        <div style="flex:1;min-width:130px">
+          <label for="myNickExtra">补充昵称（可留空）</label>
+          <input type="text" id="myNickExtra"
+                 placeholder="识别不到时才填">
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="myStart" type="button">开始查找</button>
+        <button class="btn" id="myStop" type="button" disabled>停止</button>
+        <button class="btn" id="myDump" type="button"
+                title="微信改版导致找不到按钮时，用它导出真实控件名">探测控件树</button>
+        <span class="pill" id="myMsg">未开始</span>
+      </div>
+
+      <div class="note" id="myHelp" style="display:block">
+        提示：先在「1 · 账号与目标」勾选要查的群。昵称从微信本地资料自动读取，
+        不同群会各自使用你在该群的群昵称；若某个群始终匹配不到，才在上方补一个名字。
+        方式选「本地库导出」时不需要微信窗口在前台。
+      </div>
+
+      <div class="note" id="myAuto" style="display:block">
+        <span class="hint">正在读取微信资料，自动识别你在各群的昵称…</span>
+      </div>
+
+      <div class="preview" id="myResults" style="display:none"></div>
+    </section>
+
     <section class="card rise full" style="animation-delay:.28s">
       <h2>运行日志</h2>
       <p class="hint" id="shotHint">截图保存在 shots/&lt;日期&gt;/ 目录下</p>
@@ -1082,6 +1144,163 @@ async function downloadUpdate(){
   }
 }
 
+/* ---------- 我的群消息 ---------- */
+let myTimer = null;
+
+function myTargets(){
+  return [...state.selected.values()].map(x => ({name: x.name, username: x.username}));
+}
+
+function myRenderResults(list){
+  const box = $('myResults');
+  if(!list || !list.length){ return; }
+  const rows = list.map(r => {
+    const ui = r.ui || {}, db = r.db || {};
+    let detail = [];
+    const names = r.names || [];
+    const picked = ui.matched_nick
+      ? `<strong>${escapeHtml(ui.matched_nick)}</strong>`
+      : (names.length ? escapeHtml(names[0]) : '自动识别中');
+    detail.push(`<div class="hint" style="margin:0 0 4px">自动识别的本人昵称：${picked}`
+      + (names.length > 1 ? ` <span class="hint">（备选 ${names.slice(1).map(escapeHtml).join(' / ')}）</span>` : '')
+      + `</div>`);
+    if(ui.ok && (ui.shots||[]).length){
+      detail.push(ui.shots.map(p =>
+        `<a href="/shots/${escapeHtml(p)}" target="_blank" rel="noopener">
+           <img src="/shots/${escapeHtml(p)}" alt="截图"
+                style="height:52px;border:1px solid var(--line);border-radius:6px;margin:2px"></a>`
+      ).join(''));
+      if((ui.texts||[]).length) detail.push(`<div class="hint" style="margin:4px 0">抓到 ${ui.texts.length} 条可见文本</div>`);
+    }
+    if(ui.error) detail.push(`<div class="warn" style="display:block">界面：${escapeHtml(ui.error)}</div>`);
+    if(db.ok) detail.push(`<div class="note" style="display:block">本地库：${db.count} 条本人消息 · ${escapeHtml(db.file||'')}</div>`);
+    if(db.error) detail.push(`<div class="warn" style="display:block">本地库：${escapeHtml(db.error)}</div>`);
+    return `<tr><td style="white-space:nowrap">${escapeHtml(r.group||'')}</td>
+      <td class="txt">${detail.join('') || '<span class="hint">无结果</span>'}</td></tr>`;
+  }).join('');
+  box.classList.remove('out');
+  box.style.display = 'block';
+  // 强制 reflow 让 rise 动画在每批结果刷新时都能重播
+  void box.offsetWidth;
+  box.classList.remove('rise');
+  void box.offsetWidth;
+  box.classList.add('rise');
+  box.innerHTML = `<table><thead><tr><th>群</th><th>结果</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+function myHideResults(){
+  const box = $('myResults');
+  if(box.style.display === 'none' || !box.innerHTML) return;
+  box.classList.remove('rise');
+  box.classList.add('out');
+  setTimeout(()=>{ if(box.classList.contains('out')) box.style.display='none'; }, 280);
+}
+
+async function myPoll(){
+  try{
+    const s = await api('/api/myhistory/status');
+    const running = s.state === 'running';
+    $('myMsg').textContent = (s.state === 'idle' ? '未开始' : s.state === 'done' ? '已完成'
+      : s.state === 'cancelled' ? '已取消' : s.state === 'error' ? '出错' : '处理中')
+      + (s.total ? ` ${s.done}/${s.total}` : '')
+      + (s.message ? ' · ' + s.message : '');
+    $('myStart').disabled = running;
+    $('myStop').disabled = !running;
+    if(s.results && s.results.length) myRenderResults(s.results);
+    if(running){ myTimer = setTimeout(myPoll, 900); }
+    else if(myTimer){ clearTimeout(myTimer); myTimer = null; }
+  }catch(e){
+    $('myMsg').textContent = '状态读取失败：' + e.message;
+    if(myTimer){ clearTimeout(myTimer); myTimer = null; }
+  }
+}
+
+async function myLoadAuto(){
+  const box = $('myAuto');
+  try{
+    const r = await api('/api/myhistory/self');
+    if(!r.ok) throw new Error(r.error || '读取失败');
+    const glob = (r.global_names || []).filter(Boolean);
+    const groups = r.groups || [];
+    const named = groups.filter(g => (g.names||[]).length &&
+      (g.names[0] !== glob[0]));
+    const html = [
+      `<strong>自动识别完成</strong> · 共 ${r.group_count || 0} 个群`,
+      glob.length ? `微信昵称：<strong>${escapeHtml(glob[0])}</strong>` : '',
+      named.length
+        ? `其中 ${named.length} 个群你设置了不同的群昵称，会按群自动使用：`
+          + named.slice(0, 3).map(g => `<code>${escapeHtml(g.names[0])}</code>`).join('、')
+          + (named.length > 3 ? ' 等' : '')
+        : '未发现单独的群昵称，统一使用微信昵称。',
+      '<span class="hint">全程无需填写</span>'
+    ].filter(Boolean).join('　·　');
+    box.innerHTML = html;
+  }catch(e){
+    box.innerHTML = `<span class="hint">自动识别暂不可用（${escapeHtml(e.message)}）；`
+      + '仍可正常使用，个别群匹配不到时再在上方补昵称。</span>';
+  }
+}
+
+async function myLoadCfg(){
+  try{
+    const d = await api('/api/settings');
+    for(const g of (d.groups||[])){
+      if(g.name !== '我的群消息') continue;
+      for(const it of (g.items||[])){
+        if(it.key === 'myhistory_pages' && it.value) $('myPages').value = it.value;
+      }
+    }
+  }catch(e){ /* 设置读不到不影响使用，留空即可 */ }
+  myPoll();
+  myLoadAuto().catch(()=>{});
+}
+
+async function myStart(){
+  const targets = myTargets();
+  if(!targets.length) return toast('请先在「1 · 账号与目标」勾选要查的群');
+  const btn = $('myStart');
+  btn.disabled = true;
+  try{
+    const r = await api('/api/myhistory/start', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        targets,
+        nickname: $('myNickExtra').value.trim(),
+        mode: $('myMode').value,
+        pages: Number($('myPages').value || 3)
+      })});
+    if(!r.ok) throw new Error(r.error || '启动失败');
+    myHideResults();
+    $('myMsg').textContent = `已启动，共 ${r.total} 个群`;
+    toast('开始查找，微信窗口会被操作，请勿手动点击');
+    if(myTimer) clearTimeout(myTimer);
+    myTimer = setTimeout(myPoll, 700);
+  }catch(e){
+    btn.disabled = false;
+    toast('启动失败：' + e.message);
+  }
+}
+
+async function myStop(){
+  try{ await api('/api/myhistory/stop', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:'{}'}); toast('已请求停止');
+  }catch(e){ toast('停止失败：' + e.message); }
+}
+
+async function myDump(){
+  const btn = $('myDump');
+  btn.disabled = true;
+  try{
+    const r = await api('/api/myhistory/dump', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:'{}'});
+    if(!r.ok) throw new Error(r.error || '探测失败');
+    $('myMsg').textContent = `已导出 ${r.nodes} 个控件 → ${r.path}`;
+    toast('控件树已导出到 logs/，找不到按钮时把真实名字填到「设置 → 我的群消息」');
+  }catch(e){ toast('探测失败：' + e.message); }
+  finally{ btn.disabled = false; }
+}
+
 async function cleanupNow(){
   try{
     const r = await api('/api/cleanup', {method:'POST',
@@ -1676,6 +1895,9 @@ $('openSettings').addEventListener('click', openSettingsPage);
 $('checkUpdate').addEventListener('click', ()=>checkUpdateNow(true));
 $('updDownload').addEventListener('click', downloadUpdate);
 $('shotChk').addEventListener('change', toggleShot);
+$('myStart').addEventListener('click', myStart);
+$('myStop').addEventListener('click', myStop);
+$('myDump').addEventListener('click', myDump);
 
 /* 失败补发 */
 $('reloadFails').addEventListener('click', loadFails);
@@ -1724,6 +1946,7 @@ async function loadPaths(){
     scheduleNotify(8000);
     // 版本号 + 启动后静默查一次更新（有新版本才展开，没更新不占地方）
     loadAppInfo().catch(()=>{});
+    myLoadCfg().catch(()=>{});
     setTimeout(()=>{ checkUpdateNow(false); }, 5000);
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));
