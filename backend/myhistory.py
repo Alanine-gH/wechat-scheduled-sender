@@ -601,6 +601,10 @@ class _Job:
         self.current = ""
         self.message = ""
         self.results: List[Dict[str, Any]] = []
+        # 引擎初始化失败的原因。单独放，不塞进 results —— 之前塞成
+        # group="(引擎)" 的伪结果，前端当成普通群渲染，异常里的换行
+        # hint 被表格行截断，看起来像凭空冒出一段没头没尾的警告。
+        self.engine_error = ""
         self.started = 0.0
 
     def snapshot(self) -> Dict[str, Any]:
@@ -608,6 +612,7 @@ class _Job:
             return {"state": self.state, "mode": self.mode,
                     "total": self.total, "done": self.done,
                     "current": self.current, "message": self.message,
+                    "engine_error": self.engine_error,
                     "elapsed": round(time.time() - self.started, 1) if self.started else 0,
                     "results": list(self.results)}
 
@@ -1118,11 +1123,14 @@ def _worker(targets, nickname, mode, pages, shot_dir, data_dir, log_dir):
         if mode in ("ui", "both"):
             try:
                 engine = S.SendEngine(should_stop=_cancelled)
-            except Exception as e:
                 with JOB.lock:
-                    JOB.results.append({"group": "(引擎)",
-                                        "ui": {"ok": False,
-                                               "error": "控件树不可用：%s" % e}})
+                    JOB.engine_error = ""
+            except Exception as e:
+                # 单独的状态字段，前端在结果表格外显示一条完整、可关闭的提示。
+                # 不再往 results 里塞伪行（详见 _Job.engine_error 注释）。
+                with JOB.lock:
+                    JOB.engine_error = str(e)
+                JOB.log("界面模式不可用：%s（本地库导出继续）" % e)
                 engine = None
 
         for idx, t in enumerate(targets):
@@ -1194,6 +1202,7 @@ def start(targets, nickname, mode, pages, shot_dir, data_dir, log_dir) -> Dict[s
         JOB.current = ""
         JOB.message = "启动中…"
         JOB.results = []
+        JOB.engine_error = ""      # 每轮清空，避免上轮失败提示残留
         JOB.started = time.time()
     th = threading.Thread(target=_worker,
                           args=(targets or [], nickname or "", mode, pages,

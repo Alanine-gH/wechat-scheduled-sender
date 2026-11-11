@@ -143,22 +143,47 @@ def find_wechat_window(restore: bool = True) -> Optional[int]:
     return max(found, key=lambda x: x[1])[0] if found else None
 
 
-def ensure_window_visible(hwnd: int) -> None:
+def ensure_window_visible(hwnd: int) -> bool:
+    """把微信窗口真正叫到前台，返回是否成功。
+
+    微信最小化到托盘时窗口是 ``SW_HIDE``（不是 IsIconic），此时 Qt 不会
+    构建 mmui 子控件树，gate 再怎么写也拿不到控件 —— 这是「控件树未能
+    实体化」最常见的原因。必须 SHOW + RESTORE + 前台三重保险，并**验证**
+    IsWindowVisible；SetForegroundWindow 受 Windows 前台锁定限制会失败，
+    用 AttachThreadInput 兜底，失败也不能静默吞掉。
+    """
     if win32gui is None:
-        return
+        return False
     try:
         if win32gui.IsIconic(hwnd):
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
-        win32gui.SetForegroundWindow(hwnd)
+        win32gui.ShowWindow(hwnd, win32con.SW_SHOWNORMAL)
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            # 前台锁定：附加到前台线程的输入队列后再试一次
+            try:
+                fg = win32gui.GetForegroundWindow()
+                cur = ctypes.windll.kernel32.GetCurrentThreadId()
+                fg_tid = ctypes.windll.user32.GetWindowThreadProcessId(fg, None)
+                ctypes.windll.user32.AttachThreadInput(cur, fg_tid, True)
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                    win32gui.BringWindowToTop(hwnd)
+                finally:
+                    ctypes.windll.user32.AttachThreadInput(cur, fg_tid, False)
+            except Exception:
+                pass
+        time.sleep(0.8)
+        return bool(win32gui.IsWindowVisible(hwnd))
     except Exception:
-        pass
-    time.sleep(0.8)
+        return False
 
 
-# 本程序完整验证过的微信版本。微信升级会改 Weixin.dll，
-# accessibility gate（控件树开关）的位置随之变化，新版本可能扫不准。
-VERIFIED_WECHAT_VERSIONS = ("4.1.15.13", "4.1.15.53")
+# 已实测能正常热激活 gate 并物化出 mmui 控件树的微信版本。
+# 版本只用于诊断信息，不参与放行判断 —— 能不能用一律看 _uia_ready()。
+VERIFIED_WECHAT_VERSIONS = ("4.1.15.13", "4.1.15.53", "4.2.0.13")
 
 
 _VERSION_DIR_RE = re.compile(r"^\d+\.\d+(\.\d+)*$")
@@ -224,8 +249,16 @@ def wake_accessibility(hwnd: int, retries: int = 3) -> bool:
 
     微信重启/升级/重登后 gate byte 会重置为 0，控件树退回空壳；
     这里做多次重试，每次重新写入并校验。
+
+    注意：第三方 ``wake(verify=True)`` 的「UIA 树已物化」只要求根控件
+    ClassName 以 mmui:: 开头，**空壳也算成功**，不能拿它当结果。
+    一律以本项目 ``_uia_ready``（要求 MainView 或 >=3 个 mmui 子控件）为准，
+    否则会放行空壳树，重演 v2.0.2「47 张全群消息」误截事故。
     """
     for i in range(retries):
+        # 每轮都重新确保窗口可见：托盘隐藏状态下 Qt 不建子树，
+        # 只在开头叫一次是不够的（SetForegroundWindow 可能被前台锁定拒绝）。
+        ensure_window_visible(hwnd)
         try:
             from wechatauto import accessibility as _acc
             try:
@@ -237,11 +270,6 @@ def wake_accessibility(hwnd: int, retries: int = 3) -> bool:
 
         if _uia_ready(hwnd, timeout=4.0):
             return True
-        # 窗口可能被最小化/遮挡，恢复后再试
-        try:
-            ensure_window_visible(hwnd)
-        except Exception:
-            pass
         time.sleep(1.0)
     return False
 
@@ -426,19 +454,18 @@ class SendEngine:
                 time.sleep(2.5)
         self.root = None
 
+        # 4 轮都失败。这里的表述必须准确且可操作：
+        # 不再说「版本不支持 / 请退回旧版」（4.2.0.13 实测可用），
+        # 而是给出真正能解决问题的三步，并说明本地库导出不受影响。
         ver = detect_wechat_version()
-        hint = ""
-        if ver and ver not in VERIFIED_WECHAT_VERSIONS:
-            hint = ("\n检测到微信版本 %s；本程序只在 %s 上完整验证过。"
-                    "微信升级会改变 accessibility gate 的位置，"
-                    "可能导致控件树无法实体化。"
-                    "建议关闭微信自动更新并退回已验证版本。"
-                    % (ver, " / ".join(VERIFIED_WECHAT_VERSIONS)))
-        elif ver:
-            hint = "\n当前微信版本 %s（已验证版本）。" % ver
+        hint = ("\n检测到的微信版本：%s" % (ver or "未知"))
         raise RuntimeError(
-            "微信控件树未能实体化（accessibility gate 未生效）。"
-            "请确认微信已登录；若刚重启过微信，重试本程序即可。" + hint
+            "微信控件树没能物化出可操作的 mmui 子控件（gate 已写入但树仍是空壳）。"
+            "请依次试：\n"
+            "  1. 把微信窗口从托盘点开、保持在屏幕前台，别最小化；\n"
+            "  2. 完全退出微信后重新登录（冷启动会重建控件树），再点「探测控件树」；\n"
+            "  3. 仍不行就重启一次本程序。\n"
+            "本地库导出不依赖控件树，可以照常使用。" + hint
         )
 
     # -- 控件查找 ----------------------------------------------------------

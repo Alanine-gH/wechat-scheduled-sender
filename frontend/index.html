@@ -526,11 +526,36 @@
       <div class="note" id="myHelp" style="display:block">
         提示：先在「1 · 账号与目标」勾选要查的群。昵称从微信本地资料自动读取，
         不同群会各自使用你在该群的群昵称；若某个群始终匹配不到，才在上方补一个名字。
-        方式选「本地库导出」时不需要微信窗口在前台。
+        方式选「界面截屏」时请把微信窗口从托盘点开并保持在前台；
+        选「本地库导出」则不需要微信窗口，速度也更快。
       </div>
 
       <div class="note" id="myAuto" style="display:block">
         <span class="hint">正在读取微信资料，自动识别你在各群的昵称…</span>
+      </div>
+
+      <!-- 引擎初始化失败：单独一条完整提示，不混进结果表格 -->
+      <div id="myEngineWarn" class="myengine" hidden>
+        <style>
+          #myEngineWarn { margin:10px 0 0; padding:11px 13px; border:1px solid #f0d9a8;
+                          border-radius:10px; background:#fffbf2; white-space:pre-wrap;
+                          font-size:12.5px; line-height:1.65; color:#7a5410;
+                          opacity:0; transform:translateY(-6px);
+                          transition:opacity .3s var(--ease), transform .3s var(--ease); }
+          #myEngineWarn.show { opacity:1; transform:none; }
+          #myEngineWarn.closing { opacity:0; transform:translateY(-6px); }
+          #myEngineWarn .eh { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+          #myEngineWarn .eh b { font-size:13px; }
+          #myEngineWarn button { margin-left:auto; transition:transform .16s var(--ease); }
+          #myEngineWarn button:active { transform:scale(.94); }
+          #myEngineWarn .body { white-space:pre-wrap; }
+        </style>
+        <div class="eh">
+          <b>界面截屏未启用</b>
+          <span class="hint">本地库导出不受影响</span>
+          <button class="btn" id="myEngineClose" type="button">知道了</button>
+        </div>
+        <div class="body" id="myEngineBody"></div>
       </div>
 
       <div class="preview" id="myResults" style="display:none"></div>
@@ -1268,8 +1293,10 @@ function myTargets(){
 
 function myRenderResults(list){
   const box = $('myResults');
-  if(!list || !list.length){ return; }
-  const rows = list.map(r => {
+  // 引擎级错误走顶部独立提示条，不再当成一个「群」渲染
+  const rowsSrc = (list || []).filter(r => r && r.group !== '(引擎)');
+  if(!rowsSrc.length){ return; }
+  const rows = rowsSrc.map(r => {
     const ui = r.ui || {}, db = r.db || {};
     let detail = [];
     const names = r.names || [];
@@ -1312,6 +1339,27 @@ function myHideResults(){
   setTimeout(()=>{ if(box.classList.contains('out')) box.style.display='none'; }, 280);
 }
 
+/* 引擎初始化失败：完整显示，不截断；可关闭，关闭后同一轮不再弹 */
+let myEngineSeen = '';
+function myShowEngineWarn(text){
+  const box = $('myEngineWarn');
+  if(!text){ return; }
+  if(text === myEngineSeen && box.classList.contains('show')){ return; }
+  myEngineSeen = text;
+  $('myEngineBody').textContent = text;
+  box.hidden = false;
+  box.classList.remove('closing');
+  void box.offsetWidth;
+  box.classList.add('show');
+}
+function myHideEngineWarn(){
+  const box = $('myEngineWarn');
+  if(!box || box.hidden) return;
+  box.classList.remove('show');
+  box.classList.add('closing');
+  setTimeout(()=>{ if(box.classList.contains('closing')) box.hidden = true; }, 300);
+}
+
 async function myPoll(){
   try{
     const s = await api('/api/myhistory/status');
@@ -1322,6 +1370,7 @@ async function myPoll(){
       + (s.message ? ' · ' + s.message : '');
     $('myStart').disabled = running;
     $('myStop').disabled = !running;
+    if(s.engine_error) myShowEngineWarn(s.engine_error);
     if(s.results && s.results.length) myRenderResults(s.results);
     if(running){ myTimer = setTimeout(myPoll, 900); }
     else if(myTimer){ clearTimeout(myTimer); myTimer = null; }
@@ -1387,6 +1436,8 @@ async function myStart(){
       })});
     if(!r.ok) throw new Error(r.error || '启动失败');
     myHideResults();
+    myHideEngineWarn();
+    myEngineSeen = '';
     $('myMsg').textContent = `已启动，共 ${r.total} 个群`;
     toast('开始查找，微信窗口会被操作，请勿手动点击');
     if(myTimer) clearTimeout(myTimer);
@@ -2013,6 +2064,7 @@ $('shotChk').addEventListener('change', toggleShot);
 $('myStart').addEventListener('click', myStart);
 $('myStop').addEventListener('click', myStop);
 $('myDump').addEventListener('click', myDump);
+$('myEngineClose').addEventListener('click', myHideEngineWarn);
 
 /* 失败补发 */
 $('reloadFails').addEventListener('click', loadFails);
