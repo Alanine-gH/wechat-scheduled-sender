@@ -32,8 +32,16 @@ contextBridge.exposeInMainWorld('__WCS__', {
   setAutostart: (on) => ipcRenderer.invoke('wcs:set-autostart', !!on),
   // 打开独立设置窗口（单例，已开则聚焦）
   openSettings: () => ipcRenderer.invoke('wcs:open-settings'),
-  // 打开更新下载目录里的安装包（主进程校验路径白名单，别处打不开）
+  // 打开更新下载目录里的安装包所在文件夹（主进程校验路径白名单）
   openPath: (p) => ipcRenderer.invoke('wcs:open-path', String(p || '')),
+  // 安装更新：主进程弹确认框，确认后停边车、退出本程序、延迟启动安装包
+  installUpdate: (p) => ipcRenderer.invoke('wcs:install-update', String(p || '')),
+  // 用户数据根目录：查询 / 自定义（自定义写同级引导文件，重启生效）
+  getDataRoot: () => ipcRenderer.invoke('wcs:data-root'),
+  setDataRoot: (p) => ipcRenderer.invoke('wcs:set-data-root', String(p || '')),
+  // 选择文件夹（用于自定义数据目录）
+  pickDirectory: () => ipcRenderer.invoke('wcs:pick-directory'),
+  revealDataRoot: () => ipcRenderer.invoke('wcs:reveal-data-root'),
   // 关闭当前窗口（设置页的「关闭」按钮用；浏览器模式走 window.close）
   closeSettings: () => {
     try { window.close(); } catch (_) {}

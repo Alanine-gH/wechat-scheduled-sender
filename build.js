@@ -17,11 +17,18 @@
  *    把它钉到 <项目>\cache\electron-builder；同时把 Electron 二进制缓存也钉住。
  *    （这两个缓存是构建期产物，不随程序分发，但同样不该污染用户目录。）
  *
+ * 3) 自有 Python 代码不随包分发明文
+ *    打包前把 backend/*.py 编译加密成 temp/protected-backend/ 下的
+ *    core.bin + sourceless _boot.pyc，package.json 的 extraResources 指向它。
+ *    必须用 vendor/python/python.exe 跑（marshal 字节码与 3.14.7 绑定，
+ *    系统 Python 版本不同会产出无法加载的 .pyc）。
+ *    构建结束（无论成败）清理该临时目录，不留在工作区。
+ *
  * 用法：
  *    node build.js --win --x64                NSIS 安装包
  *    node build.js --win portable --x64       免安装便携版
  */
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -96,15 +103,49 @@ if (version) {
 }
 
 let restored = false;
+
+// --- 自有 Python 代码保护产物 -------------------------------------------
+// 每次构建用随机密钥重新生成，产物只存在于本次构建期间。
+const protectedDir = path.join(projectDir, 'temp', 'protected-backend');
+const bundledPython = path.join(projectDir, 'vendor', 'python', 'python.exe');
+const protectScript = path.join(projectDir, 'tools', 'protect_backend.py');
+
+function cleanupProtected() {
+  try { fs.rmSync(protectedDir, { recursive: true, force: true }); }
+  catch (e) { /* 忽略 */ }
+}
+
+if (!fs.existsSync(bundledPython)) {
+  process.stderr.write(
+    '\n[build] 缺少内嵌 Python: ' + bundledPython + '\n' +
+    '        请先运行 tools/prepare-python.ps1（或「准备内嵌Python.bat」）。\n' +
+    '        保护脚本必须用它编译，不能用系统 Python（字节码版本绑定）。\n\n');
+  process.exit(1);
+}
+const pr = spawnSync(bundledPython,
+  [protectScript, '--src', path.join(projectDir, 'backend'),
+   '--out', protectedDir],
+  { cwd: projectDir, encoding: 'utf8', timeout: 120000 });
+if (pr.status !== 0) {
+  process.stderr.write('[build] 保护 Python 代码失败:\n'
+    + (pr.stdout || '') + '\n' + (pr.stderr || '') + '\n');
+  cleanupProtected();
+  restore();
+  process.exit(1);
+}
+process.stdout.write((pr.stdout || '').trimEnd() + '\n');
+
 function restore() {
-  if (restorePkg && !restored) {
-    restored = true;
+  if (restored) return;
+  restored = true;
+  if (restorePkg) {
     try {
       restorePkg();
     } catch (e) {
       process.stderr.write('[build] 还原 package.json 失败：' + e.message + '\n');
     }
   }
+  cleanupProtected();
 }
 process.on('exit', restore);
 

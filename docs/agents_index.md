@@ -17,6 +17,8 @@
 | 排查记录-too many SQL variables.md | 大账号上联系人面板报「too many SQL variables」：`db.get_groups()` 用全量成员 id 拼 IN 超过 SQLite 参数上限，contacts.py 自行重写并分片 | `docs/` | 2026-11-04 |
 | 排查记录-先发文字却没发文字.md | 「设置了先发文字却只发素材」：开始发送复用旧计划（text 为空）+ 编排模式 media_first 硬编码，含假引擎编排测试 | docs/ | 2026-11-05 |
 | 设计文档-v2.0.0-截图开关与分发与微信目录定位.md | v2.0.0：截图存档开关、百度网盘分发入口、微信数据目录三层定位（含诊断与真实大账号等价性验证） | `docs/` | 2026-11-05 |
+| 设计文档-Python代码保护.md | v2.0.3：自有 23 个模块编译加密成 core.bin + sourceless _boot.pyc 内存加载、第三方无用文件清理、字节码版本绑定；明确标注「密钥随包，不是防逆向保护」 | `docs/` | 2026-11-11 |
+| 设计文档-升级安装与用户数据目录外置.md | v2.0.3：用户数据移到安装目录同级（可自定义）、安装包下载到 `<数据根>/updates/`、点安装时确认并退出程序、老版本一次性迁移脚本；含 NSIS `RMDir /r $INSTDIR` 根因与上游 issue 对比 | `docs/` | 2026-11-11 |
 | 设计文档-我的群消息-自动识别与截屏.md | v2.0.1 新增 / v2.0.2 修复：我的群消息（UIA 八步截屏 + 本地库导出）、从 `chat_room.ext_buffer` 按群自动识别本人昵称、按 PID 归窗、跨窗口/下拉重试；含「47 张全群消息」事故记录与状态验证改造 | `docs/` | 2026-11-10 |
 | 1.8.0→2.0.0 更新宣传片（非文档） | 12 屏版本回顾 + 两屏完整下载链接（GitHub / 百度网盘），含脱敏截图与生成脚本；已挂到 v2.0.0 Release | `宣传视频/2.0.0/` | 2026-11-05 |
 | v1.8.0 使用教程片（非文档） | 宣传视频工程：成片 + 18 张脱敏界面截图 + 生成脚本。`宣传视频/` 已被 .gitignore 排除，不进仓库 | `宣传视频/1.8.0/` | 2026-11-04 |
@@ -47,6 +49,8 @@
 | `backend/targets.py` | 群管理：active / reduced（隔天）/ paused |
 | `tools/prepare-python.ps1` | 造出 vendor\python（打包所需的内嵌解释器），幂等可重跑 |
 | `tools/md2docx.py` | Markdown 转排好版的 Word（给使用者的说明文档用） |
+| `tools/migrate-user-data.bat` | v2.0.2 及更早版本升级前，把用户数据搬出安装目录（一次性，幂等，不删除） |
+| `tools/protect_backend.py` | 构建期把 backend/*.py 编译加密成 core.bin + sourceless _boot.pyc（必须用内嵌 Python 跑） |
 | `backend/media.py` | 素材：三种来源收集 + 按目标分配 |
 | `backend/clipboard.py` | 剪贴板：图片 CF_DIB / 文件 CF_HDROP，供微信粘贴 |
 | `electron/main.js` | 主进程：安装目录重定向、拉起/回收 Python 边车、建窗口 |

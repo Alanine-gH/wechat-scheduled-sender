@@ -431,6 +431,47 @@
           <span class="pill" id="updProg"></span>
         </div>
       </div>
+
+      <div id="dataRootBox" class="dataroot">
+        <style>
+          /* 只作用于本卡片，不改全局样式文件 */
+          #dataRootBox { margin-top:14px; padding:12px 14px; border:1px solid var(--line);
+                         border-radius:10px; background:#fbfcfe;
+                         transition: box-shadow .22s var(--ease), border-color .22s var(--ease); }
+          #dataRootBox:hover { border-color:#b9cdf3; box-shadow:0 2px 12px rgba(37,99,235,.08); }
+          #dataRootBox .dr-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+          #dataRootBox .dr-path { font-family:ui-monospace,Consolas,monospace; font-size:12px;
+                                  color:var(--ink2); word-break:break-all; }
+          #dataRootBox .dr-detail { max-height:0; opacity:0; overflow:hidden;
+                                    transition:max-height .32s var(--ease), opacity .28s var(--ease); }
+          #dataRootBox.open .dr-detail { max-height:260px; opacity:1; }
+          #dataRootBox .dr-actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+          #dataRootBox button { transition:transform .16s var(--ease), box-shadow .2s var(--ease); }
+          #dataRootBox button:active { transform:scale(.96); }
+          #dataRootBox .dr-msg { opacity:0; transform:translateY(-4px);
+                                 transition:opacity .25s var(--ease), transform .25s var(--ease); }
+          #dataRootBox .dr-msg.show { opacity:1; transform:none; }
+        </style>
+        <div class="dr-head">
+          <b style="font-size:13px">用户数据目录</b>
+          <span class="pill" id="drTag">读取中</span>
+          <button class="btn" id="drToggle" type="button" style="margin-left:auto">详情</button>
+        </div>
+        <div class="dr-path" id="drPath" style="margin-top:6px">—</div>
+        <div class="dr-detail" id="drDetail">
+          <p class="hint" style="margin:10px 0 0">
+            用户数据保存在安装目录<strong>之外</strong>的同级目录，升级、覆盖安装、卸载都不会删除它；
+            下载的安装包也放在这里的 <code>updates/</code> 下，不在安装目录内。
+            这里不是 <code>~</code> / <code>%APPDATA%</code>。
+          </p>
+          <div class="dr-actions">
+            <button class="btn" id="drPick" type="button">自定义目录…</button>
+            <button class="btn" id="drReset" type="button">恢复默认</button>
+            <button class="btn" id="drReveal" type="button">打开目录</button>
+          </div>
+          <div class="hint dr-msg" id="drMsg"></div>
+        </div>
+      </div>
     </section>
 
     <section class="card rise full" style="animation-delay:.27s" id="myPanel">
@@ -1090,7 +1131,7 @@ async function pollDownload(){
     }
     if(s.state === 'done'){
       $('updProg').textContent = '';
-      $('updDownload').textContent = '打开安装包';
+      $('updDownload').textContent = '退出并安装';
       $('updDownload').disabled = false;
       $('updDownload').dataset.done = s.path || '';
       showUpdBox('ok');
@@ -1098,7 +1139,8 @@ async function pollDownload(){
       $('updTitle').textContent = '安装包已下载';
       $('updNotes').hidden = false;
       $('updNotes').textContent = '已保存到：\n' + s.path
-        + '\n\n点「打开安装包」运行它，按提示装完即可。安装前建议先关掉本程序。';
+        + '\n\n点「退出并安装」后会弹确认框，确认后本程序自动退出并运行安装包。'
+        + '\n用户数据在安装目录之外，升级不会丢失。';
       return;
     }
     if(s.state === 'error'){
@@ -1117,12 +1159,22 @@ async function pollDownload(){
 
 async function downloadUpdate(){
   const btn = $('updDownload');
-  if(btn.dataset.done){                      // 已下载完 -> 这次是「打开安装包」
+  if(btn.dataset.done){                      // 已下载完 -> 这次是「退出并安装」
     const p = btn.dataset.done;
-    if(WCS && WCS.openPath){
-      const r = await WCS.openPath(p);
-      if(!r || !r.ok) toast('打开失败：' + ((r && r.error) || '未知'));
-    }else{ toast('请手动打开：' + p); }
+    if(WCS && WCS.installUpdate){
+      const r = await WCS.installUpdate(p);
+      if(!r || !r.ok){
+        if(!(r && r.cancelled)) toast('安装失败：' + ((r && r.error) || '未知'));
+        return;
+      }
+      // 主进程正在退出，界面马上会关掉；给个即时反馈即可
+      toast('正在退出并安装…');
+      btn.disabled = true;
+      return;
+    }
+    // 浏览器模式没有主进程可退出：给出明确的人工步骤，不能静默双击
+    if(WCS && WCS.openPath){ await WCS.openPath(p); }
+    toast('请先完全退出本程序，再手动运行：' + p);
     return;
   }
   btn.disabled = true;
@@ -1142,6 +1194,69 @@ async function downloadUpdate(){
     btn.disabled = false; $('updProg').textContent = '';
     toast('下载启动失败：' + e.message);
   }
+}
+
+/* ---------- 用户数据目录 ---------- */
+let drInfo = null;
+
+function drMsg(text){
+  const el = $('drMsg');
+  el.textContent = text || '';
+  el.classList.toggle('show', !!text);
+}
+
+async function loadDataRoot(){
+  const pathEl = $('drPath'), tag = $('drTag');
+  try{
+    if(WCS && WCS.getDataRoot){
+      drInfo = await WCS.getDataRoot();
+    }else{
+      const r = await api('/api/app');
+      drInfo = { ok:true, root:r.data_root || '', defaultRoot:r.data_root || '',
+                 custom:false, isDev:true, migrated:[] };
+    }
+    pathEl.textContent = drInfo.root || '—';
+    tag.textContent = drInfo.custom ? '自定义' : '默认';
+    if(drInfo.migrated && drInfo.migrated.length){
+      drMsg('已从安装目录迁移：' + drInfo.migrated.join('、'));
+    }
+  }catch(e){
+    tag.textContent = '读取失败';
+    drMsg(e.message || '无法读取数据目录');
+  }
+}
+
+async function setDataRoot(dir){
+  if(!(WCS && WCS.setDataRoot)){
+    drMsg('浏览器模式不支持修改，请设置环境变量 WCS_DATA_ROOT 后重启');
+    return;
+  }
+  const r = await WCS.setDataRoot(dir);
+  if(!r || !r.ok){ drMsg('修改失败：' + ((r && r.error) || '未知')); return; }
+  drMsg(dir ? '已设为 ' + r.root + '，重启后生效（当前数据不自动移动）'
+            : '已恢复默认：' + r.root + '，重启后生效（原有数据不自动移动）');
+  await loadDataRoot();
+}
+
+async function initDataRoot(){
+  $('drToggle').addEventListener('click', ()=>{
+    $('dataRootBox').classList.toggle('open');
+  });
+  $('drPick').addEventListener('click', async ()=>{
+    if(!(WCS && WCS.pickDirectory)){ drMsg('当前环境不支持选择目录'); return; }
+    const dirs = await WCS.pickDirectory();
+    if(dirs && dirs.length) await setDataRoot(dirs[0]);
+  });
+  $('drReset').addEventListener('click', ()=>setDataRoot(''));
+  $('drReveal').addEventListener('click', async ()=>{
+    if(WCS && WCS.revealDataRoot){
+      const r = await WCS.revealDataRoot();
+      if(!r || !r.ok) drMsg('打开失败：' + ((r && r.error) || '未知'));
+    }else{
+      drMsg('路径：' + ((drInfo && drInfo.root) || '—'));
+    }
+  });
+  await loadDataRoot();
 }
 
 /* ---------- 我的群消息 ---------- */
@@ -1947,6 +2062,7 @@ async function loadPaths(){
     // 版本号 + 启动后静默查一次更新（有新版本才展开，没更新不占地方）
     loadAppInfo().catch(()=>{});
     myLoadCfg().catch(()=>{});
+    initDataRoot().catch(()=>{});
     setTimeout(()=>{ checkUpdateNow(false); }, 5000);
   }catch(e){
     console.error('[wcs] 初始化失败: ' + (e && e.message));

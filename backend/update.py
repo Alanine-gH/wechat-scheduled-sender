@@ -11,7 +11,13 @@
 所以这里做的是**可靠的「检查 + 下载 + 交给用户点安装」**：
   - 查 GitHub Releases（公开仓库，无需 token）
   - 版本号自己比较，不依赖接口返回顺序
-  - 下载到安装目录的 temp/，校验大小，再让用户手动运行安装程序
+  - 下载到 **用户数据根目录的 updates/**（不是安装目录），校验大小，
+    再由主进程弹确认框、退出本程序、延迟运行安装包
+
+  为什么安装包绝不能放安装目录里：
+    NSIS 覆盖安装会 `RMDir /r $INSTDIR` 删光整个安装目录。安装包放在里面
+    会自己删自己，安装包进程本身占着 $INSTDIR 也会让删除失败而 Abort。
+    数据根在安装目录**同级**，NSIS 碰不到；也不在 ~ / %APPDATA% 下。
 
 设计约束：
   - **不接受前端传 URL**。下载地址由服务端重新从 Release 里取，
@@ -261,7 +267,10 @@ def _worker(data_dir: str, want_name: str) -> None:
         if not url:
             raise RuntimeError("资产缺少下载地址")
 
-        outdir = os.path.join(data_dir, "temp", "update")
+        # data_dir 是「用户数据根目录」（server 传 userdata.data_root()）。
+        # 安装包放根下的 updates/，与 electron/main.js 的 DIRS.updates 白名单一致。
+        # 绝不能拼接成安装目录内的路径：NSIS 覆盖安装会删光 $INSTDIR。
+        outdir = os.path.join(data_dir, "updates")
         os.makedirs(outdir, exist_ok=True)
         out = os.path.join(outdir, name)
         part = out + ".part"

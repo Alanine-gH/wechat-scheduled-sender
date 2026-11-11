@@ -816,6 +816,8 @@ class Handler(BaseHTTPRequestHandler):
                     "pan_url": str(st.get("pan_url") or ""),
                     "pan_code": str(st.get("pan_code") or ""),
                     "shot_enabled": bool(st.get("shot_enabled", True)),
+                    "data_root": ROOT,
+                    "updates_dir": os.path.join(ROOT, "updates"),
                 })
             if p == "/api/myhistory/status":
                 return self._json({"ok": True, **myhistory_mod.status()})
@@ -1182,7 +1184,9 @@ class Handler(BaseHTTPRequestHandler):
                 # 避免这个接口被当成 SSRF 跳板。
                 body = body or {}
                 name = str(body.get("asset") or "")
-                return self._json(update_mod.start_download(DATA_DIR, name))
+                # 传「用户数据根目录」：安装包落 <根>/updates，不在 $INSTDIR 内
+                # （NSIS 覆盖安装会删光安装目录）
+                return self._json(update_mod.start_download(ROOT, name))
 
             if p == "/api/myhistory/dump":
                 # 只读探测：把当前微信窗口的 UIA 控件树写到 logs/，

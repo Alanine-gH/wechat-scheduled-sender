@@ -32,11 +32,10 @@
     ],
     "extraResources": [
       {
-        "from": "backend",
+        "from": "temp/protected-backend",
         "to": "backend",
         "filter": [
-          "**/*",
-          "!__pycache__/**"
+          "**/*"
         ]
       },
       {
@@ -45,7 +44,20 @@
       },
       {
         "from": "vendor/python",
-        "to": "python"
+        "to": "python",
+        "filter": [
+          "**/*",
+          "!**/*.pyi",
+          "!**/*.f90",
+          "!**/*.f",
+          "!**/*.h",
+          "!**/*.c",
+          "!**/*.cpp",
+          "!**/*.pyx",
+          "!**/*.pxd",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
       }
     ],
     "win": {

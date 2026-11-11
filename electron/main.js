@@ -4,11 +4,13 @@
  *
  * 两件事最容易出错，这里都显式处理：
  *
- * 1) 「所有用户文件都在安装目录下」
+ * 1) 「所有用户文件都不在 ~ 下，也不在安装目录里」
  *    Electron / Chromium 默认会把 userData、会话数据、崩溃转储写到
- *    %APPDATA% / %TEMP%（也就是用户目录）。必须在 app ready 之前
+ *    %APPDATA% / %TEMP%（用户目录）。必须在 app ready 之前
  *    用 app.setPath(...) 改道，否则会先创建再改，已经晚了。
- *    本程序把这些全部指向 <安装目录>/runtime。
+ *    本程序把它们指向 <安装目录同级>/WeChatSender-Data/runtime。
+ *    数据根不放在 $INSTDIR 内，是因为 NSIS 覆盖安装/卸载会
+ *    `RMDir /r $INSTDIR` 把整个安装目录删光。
  *
  * 2) Python 边车进程的生命周期
  *    WeChat 自动化靠 Python（wechatauto-replica + uiautomation），
@@ -27,11 +29,28 @@ const IS_DEV = !app.isPackaged;
 // ---------------------------------------------------------------------------
 // 1. 安装目录与用户文件根目录（必须在 ready 之前）
 // ---------------------------------------------------------------------------
+// 为什么数据根目录不在安装目录里：
+//   electron-builder 的 NSIS 卸载段是 `RMDir /r $INSTDIR`（模板
+//   node_modules/app-builder-lib/templates/nsis/uninstaller.nsh:169），
+//   覆盖安装 / 卸载会把整个安装目录删光。以前 data/ logs/ shots/ ... 都在
+//   安装目录里，一升级用户数据就没了；而且正在运行的 WeChatSender.exe 与
+//   Python 边车也在 $INSTDIR 内，atomicRMDir 遇到被占用文件会直接 Abort
+//   （electron-builder 已知问题 #6865 / #8131 / #9181），表现为"安装卡死"。
+//
+//   现在数据根放在**安装目录的同级目录**（不在 ~ / %APPDATA% 下），
+//   NSIS 只删 $INSTDIR，永远碰不到用户数据，也不在用户主目录里拉屎。
+//   下载的安装包同样放数据根下的 updates/，安装包自己也不会被删。
+// ---------------------------------------------------------------------------
 const APP_DIR = IS_DEV
   ? path.resolve(__dirname, '..')
   : path.dirname(app.getPath('exe'));
 
-const DATA_ROOT = APP_DIR;
+const APP_PARENT = path.dirname(APP_DIR);
+const DEFAULT_DATA_ROOT = path.join(APP_PARENT, 'WeChatSender-Data');
+// 自定义数据根记在同级的引导文件里。它必须在「安装目录之外」，
+// 否则升级时同样会被 NSIS 删掉，配置本身也就丢了。
+const DATA_ROOT_POINTER = path.join(APP_PARENT, 'WeChatSender-Data.location.json');
+const USER_DIR_NAMES = ['data', 'logs', 'shots', 'cache', 'tmp', 'runtime'];
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
@@ -50,6 +69,69 @@ function isWritable(dir) {
   }
 }
 
+function readDataRootPointer() {
+  try {
+    const v = JSON.parse(fs.readFileSync(DATA_ROOT_POINTER, 'utf8'));
+    const p = typeof v === 'string' ? v : (v && v.dataRoot);
+    return p ? path.resolve(String(p)) : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function resolveDataRoot() {
+  if (IS_DEV) return APP_DIR;               // 开发模式不动，免得污染项目外面
+  // 优先级：环境变量 > 引导文件 > 默认同级目录
+  const candidates = [
+    (process.env.WCS_DATA_ROOT || '').trim(),
+    readDataRootPointer(),
+    DEFAULT_DATA_ROOT,
+  ];
+  for (const c of candidates) {
+    if (!c) continue;
+    const p = path.resolve(c);
+    // 不允许指回安装目录（否则升级又会被删）；不可写就换下一个
+    if (p === APP_DIR || p.startsWith(APP_DIR + path.sep)) continue;
+    if (isWritable(p)) return p;
+  }
+  return DEFAULT_DATA_ROOT;
+}
+
+const DATA_ROOT = resolveDataRoot();
+// 供 Python 侧与界面读取（Python 的 userdata.configure 认这个环境变量）
+process.env.WCS_DATA_ROOT = DATA_ROOT;
+
+function migrateLegacyData() {
+  /** 把旧版本留在安装目录里的用户数据搬到新数据根。
+   *  只在目标为空时搬，保证幂等：NSIS customInit 可能已经先抢救过一份。
+   *  用户明确要求「移动」而不是复制/删除；跨盘 rename 失败时退化为
+   *  复制并**保留源**，绝不静默删用户文件。
+   */
+  if (IS_DEV || path.resolve(DATA_ROOT) === path.resolve(APP_DIR)) return [];
+  const moved = [];
+  for (const name of USER_DIR_NAMES) {
+    const src = path.join(APP_DIR, name);
+    const dst = path.join(DATA_ROOT, name);
+    if (!fs.existsSync(src)) continue;
+    try {
+      if (fs.existsSync(dst) && fs.readdirSync(dst).length > 0) continue;
+      fs.mkdirSync(DATA_ROOT, { recursive: true });
+      try {
+        fs.renameSync(src, dst);           // 同盘：真·移动
+        moved.push(name);
+      } catch (e) {
+        fs.cpSync(src, dst, { recursive: true, force: false });  // 跨盘：复制保底
+        moved.push(name + '(复制,源保留)');
+      }
+    } catch (e) {
+      // 此时 logs/ 可能还没创建，log() 的文件写入会失败；直接 stdout 更可靠
+      process.stdout.write('[migrate] ' + name + ' 失败: '
+        + ((e && e.message) || e) + '\n');
+    }
+  }
+  return moved;
+}
+
 const DIRS = {
   data: path.join(DATA_ROOT, 'data'),
   logs: path.join(DATA_ROOT, 'logs'),
@@ -60,9 +142,11 @@ const DIRS = {
   electron: path.join(DATA_ROOT, 'runtime', 'electron'),
   session: path.join(DATA_ROOT, 'runtime', 'session'),
   crash: path.join(DATA_ROOT, 'runtime', 'crash'),
+  updates: path.join(DATA_ROOT, 'updates'),   // 下载的安装包，绝不放 $INSTDIR 里
 };
 
-// 把 Electron / Chromium 的所有写入改到安装目录下
+// 目录创建之前先搬老数据，避免先建出空目录导致迁移被跳过
+const MIGRATED = migrateLegacyData();
 for (const d of Object.values(DIRS)) ensureDir(d);
 
 app.setPath('userData', DIRS.electron);
@@ -105,8 +189,11 @@ function pythonCandidates() {
 }
 
 function spawnPython(cand) {
+  // 打包模式：自有 Python 代码已编译加密成 core.bin，入口是 sourceless
+  // _boot.pyc（安装目录里没有任何自有 .py 明文）。开发模式仍直接跑源码，
+  // 便于调试，也不需要每次改代码都重新生成保护产物。
   const serverPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'backend', 'server.py')
+    ? path.join(process.resourcesPath, 'backend', '_boot.pyc')
     : path.join(__dirname, '..', 'backend', 'server.py');
 
   const env = Object.assign({}, process.env, {
@@ -241,21 +328,136 @@ function registerIpc() {
     }
   });
 
-  // 打开更新下载好的安装包（用系统默认方式，等于用户双击）
-  // 安全约束：只允许打开 <安装目录>/temp/update 下的文件 ——
-  // 这个通道能被渲染进程调用，不放白名单等于给了一个「执行任意文件」的入口。
+  // 更新下载目录白名单。后端下载到 <数据根>/updates（绝不在 $INSTDIR 内），
+  // 这里必须和 backend/update.py 的路径一致 —— 之前是 <安装目录>/temp/update
+  // 对 <数据根>/data/temp/update，两边对不上，按钮本来就是坏的。
+  function updateDir() { return path.resolve(DIRS.updates); }
+
+  function checkedUpdateExe(p) {
+    const allowedDir = updateDir();
+    const real = path.resolve(String(p || ''));
+    if (!real.startsWith(allowedDir + path.sep)) {
+      return { error: '只允许打开更新下载目录里的文件' };
+    }
+    if (!/\.exe$/i.test(real)) return { error: '只支持 .exe 安装包' };
+    if (!fs.existsSync(real)) return { error: '文件不存在' };
+    return { path: real };
+  }
+
+  // 打开安装包所在文件夹（用户想自己双击时用，不执行任何文件）
   ipcMain.handle('wcs:open-path', async (_e, p) => {
     try {
-      const allowedDir = path.resolve(path.join(DATA_ROOT, 'temp', 'update'));
-      const real = path.resolve(String(p || ''));
-      if (real !== allowedDir && !real.startsWith(allowedDir + path.sep)) {
-        return { ok: false, error: '只允许打开更新下载目录里的文件' };
-      }
-      if (!fs.existsSync(real)) return { ok: false, error: '文件不存在' };
-      const err = await shell.openPath(real);
-      return err ? { ok: false, error: err } : { ok: true };
+      const c = checkedUpdateExe(p);
+      if (c.error) return { ok: false, error: c.error };
+      shell.showItemInFolder(c.path);
+      return { ok: true };
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
+  // 安装更新：弹确认框 → 用户确认后才停 Python 边车、退出本程序，
+  // 再由 detached 进程延迟拉起安装包。
+  // 为什么必须退出：WeChatSender.exe / resources\python\python.exe 都在
+  // $INSTDIR 内，NSIS 卸载段 `RMDir /r $INSTDIR` 删不掉被占用的 exe 会 Abort。
+  // 为什么用延迟启动器：等主进程与边车真正退出后再运行安装包，
+  // 否则安装包一起来就撞上还没释放的句柄。
+  ipcMain.handle('wcs:install-update', async (_e, p) => {
+    try {
+      const c = checkedUpdateExe(p);
+      if (c.error) return { ok: false, error: c.error };
+
+      const r = await dialog.showMessageBox(win || null, {
+        type: 'question',
+        buttons: ['取消', '退出并安装'],
+        defaultId: 1,
+        cancelId: 0,
+        title: '安装更新',
+        message: '安装前需要关闭本程序',
+        detail: '点击「退出并安装」后，本程序会立即退出并自动运行安装包。\n'
+          + '如果有正在进行的发送任务，请先点「取消」并等它结束。\n\n'
+          + '用户数据保存在安装目录之外，升级不会丢失。',
+        noLink: true,
+      });
+      if (r.response !== 1) return { ok: false, cancelled: true };
+
+      // PowerShell 延迟 3 秒再启动安装包。用单引号包路径并转义内部单引号，
+      // 规避项目路径里的 & / 中文 / 空格。
+      const exe = c.path.replace(/'/g, "''");
+      const ps = 'Start-Sleep -Seconds 3; Start-Process -FilePath \'' + exe + '\'';
+      const child = spawn('powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+         '-Command', ps],
+        { detached: true, stdio: 'ignore', windowsHide: true });
+      child.unref();
+
+      // 先停边车再退出；before-quit / window-all-closed 里还会各调一次（幂等）
+      stopPython();
+      setImmediate(() => app.quit());
+      return { ok: true, quitting: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
+  // 数据根目录：界面显示 + 允许自定义（自定义写同级引导文件，重启生效）
+  // 在系统文件管理器里显示用户数据目录（不执行任何文件）
+  ipcMain.handle('wcs:reveal-data-root', async () => {
+    try {
+      ensureDir(DATA_ROOT);
+      shell.showItemInFolder(DATA_ROOT);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
+  ipcMain.handle('wcs:data-root', async () => ({
+    ok: true,
+    root: DATA_ROOT,
+    defaultRoot: DEFAULT_DATA_ROOT,
+    pointer: DATA_ROOT_POINTER,
+    installDir: APP_DIR,
+    custom: path.resolve(DATA_ROOT) !== path.resolve(DEFAULT_DATA_ROOT),
+    migrated: MIGRATED,
+    isDev: IS_DEV,
+  }));
+
+  ipcMain.handle('wcs:set-data-root', async (_e, p) => {
+    try {
+      if (IS_DEV) return { ok: false, error: '开发模式不支持修改数据目录' };
+      const raw = String(p || '').trim();
+      // 空串 = 恢复默认：删掉引导文件即可。
+      // 不能用 path.resolve('')（那会解析成当前工作目录）当路径写进去。
+      if (!raw) {
+        try { fs.unlinkSync(DATA_ROOT_POINTER); } catch (e) { /* 不存在就算了 */ }
+        return { ok: true, root: DEFAULT_DATA_ROOT, needRestart: true,
+                 note: '已恢复默认，重启后生效；原有数据不会自动移动' };
+      }
+      const want = path.resolve(raw);
+      if (want === APP_DIR || want.startsWith(APP_DIR + path.sep)) {
+        return { ok: false, error: '数据目录不能设在安装目录里（升级会被删除）' };
+      }
+      if (!isWritable(want)) return { ok: false, error: '该目录不可写' };
+      ensureDir(APP_PARENT);
+      fs.writeFileSync(DATA_ROOT_POINTER,
+        JSON.stringify({ dataRoot: want }, null, 2), 'utf8');
+      return { ok: true, root: want, needRestart: true,
+               note: '下次启动生效；当前数据不会自动移动，请自行迁移或保持原路径' };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
+  ipcMain.handle('wcs:pick-directory', async () => {
+    try {
+      const r = await dialog.showOpenDialog(win || null, {
+        title: '选择用户数据目录',
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      return r.canceled ? [] : r.filePaths;
+    } catch (e) {
+      return [];
     }
   });
 
@@ -379,6 +581,16 @@ function createWindow(port) {
 function stopPython() {
   if (!pyChild || pyChild.killed) return;
   log('正在停止 Python 服务…');
+  const pid = pyChild.pid;
+  // Windows 上 pyChild.kill() 只结束直接子进程；Python 边车若派生了子进程，
+  // 它们仍会占用 resources\python\ 下的 dll/exe，导致升级安装包删不掉目录。
+  // 这里补一次「进程树终止」，退出更干净。用 /T /F 且只在 Windows 上做。
+  if (process.platform === 'win32' && pid) {
+    try {
+      spawn('taskkill', ['/PID', String(pid), '/T', '/F'],
+            { stdio: 'ignore', windowsHide: true });
+    } catch (e) { /* 忽略：下面还有 kill 兜底 */ }
+  }
   try {
     pyChild.kill();
   } catch (e) {
@@ -393,10 +605,10 @@ function stopPython() {
 async function boot() {
   if (!isWritable(DATA_ROOT)) {
     dialog.showErrorBox(
-      '安装目录不可写',
-      '本程序要求把用户文件放在安装目录下：\n' + DATA_ROOT +
+      '用户数据目录不可写',
+      '用户数据保存在安装目录之外（升级/卸载不会被删除）：\n' + DATA_ROOT +
         '\n\n但该目录当前不可写。\n' +
-        '请把程序安装/解压到可写位置，例如 D:\\WeChatSender。\n' +
+        '请换一个可写的数据目录，或把程序装到可写位置，例如 D:\\WeChatSender。\n' +
         '（不要装在 C:\\Program Files 下，除非以管理员身份运行。）'
     );
     app.quit();
@@ -404,7 +616,8 @@ async function boot() {
   }
 
   log('安装目录: ' + APP_DIR);
-  log('用户文件根目录: ' + DATA_ROOT);
+  log('用户数据根目录: ' + DATA_ROOT + (MIGRATED.length
+      ? '（已从安装目录迁移: ' + MIGRATED.join(', ') + '）' : ''));
 
   let lastErr = null;
   for (const cand of pythonCandidates()) {
