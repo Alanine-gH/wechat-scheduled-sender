@@ -169,6 +169,10 @@ class Runtime:
 
 RT = Runtime()
 
+# 「我的群消息」过程接进统一运行日志（前端 #logs 面板 + run-YYYYMMDD.log）。
+# 之前它只更新界面上那一行 pill，运行日志面板永远空着，用户以为没在跑。
+myhistory_mod.JOB.log_sink = RT.log
+
 
 def _safe(name: str) -> str:
     bad = '<>:"/\\|?*\n\r\t'

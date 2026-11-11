@@ -51,6 +51,14 @@ MEMBER_TAB_NAMES = ("群成员",)
 MEMBER_SEARCH_NAMES = ("搜索群成员", "搜索成员", "查找群成员",
                        "搜索群聊成员", "Search group members")
 GLOBAL_SEARCH_MARK = "搜索"
+# 「群成员」浮层的结构性证据，不依赖会随版本变的文案：
+#   - 窗口类名：mmui::XPopover（独立顶层浮层）
+#   - 成员列表：StickyHeaderRecyclerListView / AutomationId 含 chatroom_member
+# 4.2.0.13 实测：浮层里的搜索框 Name 退化成裸「搜索」，与全局框同名，
+# 只靠文案已经分不开，必须用「它在哪个窗口、同级有没有成员列表」来判。
+MEMBER_PANEL_CLASSES = ("mmui::XPopover",)
+MEMBER_LIST_MARKS = ("chatroom_member", "stickylistrecycler",
+                     "stickyheaderrecyclerlistview")
 MEMBER_ITEM_TYPES = ("ListItemControl", "ButtonControl", "TextControl",
                      "GroupControl", "ImageControl", "PaneControl")
 # 「查找聊天记录」窗口标题实测形如："群名"的聊天记录(500)
@@ -300,8 +308,10 @@ def _page_down(prefer: Optional[int] = None) -> None:
     pairs = _roots(prefer)
     ordered = []
     for h, r in pairs:
-        has_member_box = any(_is_member_search(c)
-                             for c, _d in _walk(r, max_nodes=800))
+        # 用结构证据认浮层，不能用文案：4.2.0.13 上浮层搜索框
+        # Name 退化成裸「搜索」，旧的 _is_member_search 会恒为 False，
+        # 导致滚错窗口（滚到主窗口而不是成员浮层）。
+        has_member_box = _panel_signature(r)["is_panel"]
         ordered.append((0 if has_member_box else 1, h, r))
     ordered.sort(key=lambda x: x[0])
     for _pri, _h, r in ordered:
@@ -485,7 +495,7 @@ def _is_global_search(c) -> bool:
 
 
 def _is_member_search(c) -> bool:
-    """是不是「群成员」浮层里的「搜索群成员」框。"""
+    """是不是「群成员」浮层里的成员搜索框（只看文案）。"""
     if c.ControlTypeName != "EditControl":
         return False
     probe = " ".join((_field(c, "Name"), _field(c, "AutomationId"),
@@ -493,27 +503,75 @@ def _is_member_search(c) -> bool:
     return any(k.lower() in probe for k in MEMBER_SEARCH_NAMES)
 
 
+def _panel_signature(root) -> Dict[str, Any]:
+    """判断一个窗口根是不是「群成员筛选浮层」，并给出双重结构证据。
+
+    不依赖文案：4.2.0.13 上浮层里的搜索框 Name 退化成裸「搜索」，
+    与全局框完全同名，只有「窗口类名 + 成员列表」能可靠区分。
+    """
+    sig = {"is_panel": False, "popover": False, "member_list": False,
+           "edits": [], "items": 0}
+    nodes = list(_walk(root, max_nodes=1200))
+    for c, _d in nodes:
+        try:
+            cls = (_field(c, "ClassName") or "").lower()
+            aid = (_field(c, "AutomationId") or "").lower()
+            typ = c.ControlTypeName
+        except Exception:
+            continue
+        if any(k.lower() in cls for k in MEMBER_PANEL_CLASSES):
+            sig["popover"] = True
+        if any(k in cls or k in aid for k in MEMBER_LIST_MARKS):
+            sig["member_list"] = True
+        if typ == "EditControl":
+            sig["edits"].append(c)
+        if typ == "ListItemControl" and _field(c, "Name"):
+            sig["items"] += 1
+    # 双重证据：浮层类名 + 成员列表（或至少 3 个有名字的列表项）
+    sig["is_panel"] = sig["popover"] and (
+        sig["member_list"] or sig["items"] >= 3)
+    return sig
+
+
 def search_state(roots) -> Dict[str, Any]:
     """扫描所有窗口的搜索框，返回当前处于哪种搜索状态。
 
-    这是防止「假成功」的关键：只有出现成员搜索框、且全局框为空，
-    才说明真的切到了「群成员」筛选页。
+    这是防止「假成功」的关键：只有确认「群成员」浮层已打开、
+    且全局搜索框没被写脏，才允许往成员框里输昵称。
+
+    判定按**窗口**分组，不按单个控件的文案：
+      - 浮层窗口（mmui::XPopover + 成员列表）里的 EditControl → 成员框
+      - 其它窗口里 Name='搜索' 的 EditControl → 全局框（绝不能写）
+    这样即使 4.2.0.13 把成员框的 Name 也改成裸「搜索」，
+    也不会把全局框误当成成员框，杜绝「搜成全群消息」。
     """
     st = {"member_box": None, "global_boxes": [], "global_values": [],
-          "edits": 0}
+          "edits": 0, "panel_open": False, "panel_evidence": ""}
     for _h, r in roots:
+        sig = _panel_signature(r)
+        if sig["is_panel"]:
+            st["panel_open"] = True
+            st["panel_evidence"] = "popover=%s list=%s items=%d" % (
+                sig["popover"], sig["member_list"], sig["items"])
+            # 浮层里唯一/第一个 EditControl 就是成员搜索框
+            for c in sig["edits"]:
+                if _is_member_search(c) or st["member_box"] is None:
+                    st["member_box"] = c
+                    break
+            st["edits"] += len(sig["edits"])
+            continue
         for c, _d in _walk(r, max_nodes=1200):
             if c.ControlTypeName != "EditControl":
                 continue
             st["edits"] += 1
-            if _is_member_search(c):
-                st["member_box"] = c
-            elif _is_global_search(c):
+            # 非浮层窗口里，即使文案像「搜索群成员」也不认：
+            # 没有成员列表证据就不能往里写昵称。
+            if _is_global_search(c):
                 st["global_boxes"].append(c)
                 v = _edit_value(c)
                 if v:
                     st["global_values"].append(v)
-    st["member_open"] = st["member_box"] is not None
+    st["member_open"] = st["member_box"] is not None and st["panel_open"]
     st["global_dirty"] = bool(st["global_values"])
     return st
 
@@ -562,6 +620,9 @@ def _clear_global_search(roots) -> None:
     只清「聊天记录窗口顶部」那个框，不动成员搜索框。
     """
     for _h, r in roots:
+        # 浮层里的 Name='搜索' 是成员搜索框，不能被当全局框清掉
+        if _panel_signature(r)["is_panel"]:
+            continue
         for c, _d in _walk(r, max_nodes=1200):
             if not _is_global_search(c) or not _edit_value(c):
                 continue
@@ -619,6 +680,14 @@ class _Job:
     def log(self, msg: str) -> None:
         with self.lock:
             self.message = msg
+        # 同时喂给统一运行日志（前端 #logs 面板 + run-YYYYMMDD.log）。
+        # 用可注入回调，避免 myhistory 反向 import server 造成循环依赖。
+        cb = getattr(JOB, "log_sink", None)
+        if callable(cb):
+            try:
+                cb("INFO", msg)
+            except Exception:
+                pass
 
 
 JOB = _Job()
@@ -731,10 +800,19 @@ def _ui_one(engine, group: str, nicks: List[str], pages: int,
         _clear_global_search(_roots(hwnd))
     if not opened:
         _clear_global_search(_roots(hwnd))
-        return fail(("点了「群成员」但筛选面板没打开（试过 %s）。"
-                     "已停止，避免把昵称搜成全群消息。请用「探测控件树」"
-                     "导出真实控件名，填到「设置 → 我的群消息 → 追加控件候选名」"
-                     % " / ".join(n for n, _f in tab_strategies(tab))),
+        st = search_state(_roots(hwnd))
+        out["search_state"] = {
+            k: (bool(v) if isinstance(v, bool) else v)
+            for k, v in st.items()
+            if k not in ("member_box", "global_boxes")}
+        return fail(("没确认到「群成员」筛选浮层（试过 %s）。"
+                     "已停止，避免把昵称搜成全群消息。"
+                     "请把微信窗口从托盘点开、保持在前台后重试；"
+                     "仍不行就用「探测控件树」导出真实控件名。"
+                     "诊断：浮层=%s 成员框=%s 全局框有值=%s"
+                     % (" / ".join(n for n, _f in tab_strategies(tab)),
+                        st["panel_open"], st["member_box"] is not None,
+                        st["global_dirty"])),
                     "群成员面板未打开")
     out["tab_strategy"] = used
     snap("群成员面板已打开")
@@ -1146,6 +1224,8 @@ def _worker(targets, nickname, mode, pages, shot_dir, data_dir, log_dir):
             with JOB.lock:
                 JOB.current = name
                 JOB.message = "正在处理 %d/%d：%s" % (idx + 1, len(targets), name)
+            JOB.log("我的群消息 %d/%d：%s（方式 %s）"
+                    % (idx + 1, len(targets), name, mode))
             rec: Dict[str, Any] = {"group": name, "names": nicks[:3]}
             if mode in ("ui", "both"):
                 try:
@@ -1170,6 +1250,17 @@ def _worker(targets, nickname, mode, pages, shot_dir, data_dir, log_dir):
                                         data_dir)
                 except Exception as e:
                     rec["db"] = {"ok": False, "error": str(e)}
+            ui, dbres = rec.get("ui") or {}, rec.get("db") or {}
+            if ui.get("ok"):
+                JOB.log("  %s 界面截屏 %d 张"
+                        % (name, len(ui.get("shots") or [])))
+            elif ui.get("error"):
+                JOB.log("  %s 界面未成功：%s" % (name, ui["error"]))
+            if dbres.get("ok"):
+                JOB.log("  %s 本地库 %s 条本人消息"
+                        % (name, dbres.get("count", 0)))
+            elif dbres.get("error"):
+                JOB.log("  %s 本地库失败：%s" % (name, dbres["error"]))
             with JOB.lock:
                 JOB.results.append(rec)
                 JOB.done = idx + 1
@@ -1177,6 +1268,7 @@ def _worker(targets, nickname, mode, pages, shot_dir, data_dir, log_dir):
             JOB.state = "cancelled" if JOB.stopped else "done"
             JOB.message = ("已取消" if JOB.stopped else
                            "完成 %d 个群" % JOB.done)
+        JOB.log("我的群消息：" + JOB.message)
     except Exception as e:
         with JOB.lock:
             JOB.state = "error"
@@ -1204,6 +1296,8 @@ def start(targets, nickname, mode, pages, shot_dir, data_dir, log_dir) -> Dict[s
         JOB.results = []
         JOB.engine_error = ""      # 每轮清空，避免上轮失败提示残留
         JOB.started = time.time()
+    JOB.log("我的群消息：开始查找 %d 个群（方式 %s，最多翻 %s 屏）"
+            % (len(targets or []), mode, pages))
     th = threading.Thread(target=_worker,
                           args=(targets or [], nickname or "", mode, pages,
                                 shot_dir, data_dir, log_dir), daemon=True)

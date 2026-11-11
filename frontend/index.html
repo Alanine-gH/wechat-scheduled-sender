@@ -73,6 +73,8 @@
   .logs{margin-top:8px;height:250px;overflow:auto;background:#0f1116;border-radius:11px;padding:11px 12px;
     font:12px/1.65 ui-monospace,Consolas,monospace;color:#c9d1e0}
   .logs .l{white-space:pre-wrap;word-break:break-word}
+  .logs .l.lin{animation:logIn .28s var(--ease) both}
+  @keyframes logIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
   .logs .t{color:#5d6a80}
   .lv-OK{color:#54d68a} .lv-ERROR{color:#ff7b7b} .lv-WARN{color:#f0c268} .lv-INFO{color:#9fb0cc}
 
@@ -1939,9 +1941,11 @@ async function pollStatus(){
 let lastLogCount = 0;
 function renderLogs(logs){
   if(logs.length === lastLogCount) return;
+  const grown = logs.length > lastLogCount && lastLogCount > 0;
+  const from = grown ? lastLogCount : 0;
   lastLogCount = logs.length;
   const box = $('logs');
-  box.innerHTML = logs.map(l=>`<div class="l"><span class="t">${l.time}</span> <span class="lv-${l.level}">${escapeHtml(l.msg)}</span></div>`).join('');
+  box.innerHTML = logs.map((l,i)=>`<div class="l${grown && i>=from ? ' lin' : ''}"><span class="t">${l.time}</span> <span class="lv-${l.level}">${escapeHtml(l.msg)}</span></div>`).join('');
   box.scrollTop = box.scrollHeight;
 }
 
